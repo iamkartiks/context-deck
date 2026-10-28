@@ -1,0 +1,30 @@
+name: Bug report
+description: Something in ContextDeck doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you ran, what you expected, what you got.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Ideally reproducible against the bundled fixtures (`--claude-dir fixtures/claude --codex-dir fixtures/codex`).
+  - type: input
+    id: version
+    attributes:
+      label: contextdeck --version
+  - type: input
+    id: env
+    attributes:
+      label: OS and Node version
+      placeholder: macOS 15.1, Node 22.15.0
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: Please don't paste real transcripts or anything containing secrets.

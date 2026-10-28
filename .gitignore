@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+
+# local indexes created by `npm run demo`, CI or development
+.demo/
+.ci/
+*.db
+*.db-wal
+*.db-shm
+
+.DS_Store
+*.log
+.env
+.env.*

@@ -1,0 +1,27 @@
+name: Support a new agent
+description: Request (or volunteer to build) an adapter for another coding agent
+labels: [adapter]
+body:
+  - type: input
+    id: tool
+    attributes:
+      label: Which tool?
+      placeholder: Gemini CLI, OpenCode, Cursor, Aider…
+    validations:
+      required: true
+  - type: textarea
+    id: where
+    attributes:
+      label: Where does it store sessions, and in what format?
+      description: Folder layout, file type, any env var that moves it. A redacted line or two helps a lot.
+  - type: input
+    id: resume
+    attributes:
+      label: How do you resume a session from the command line?
+      placeholder: e.g. `gemini --resume <id>`
+  - type: checkboxes
+    id: volunteer
+    attributes:
+      label: Want to build it?
+      options:
+        - label: I'd like to write this adapter (see docs/WRITING_AN_ADAPTER.md)
