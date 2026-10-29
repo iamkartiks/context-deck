@@ -40,6 +40,7 @@ src/
   util/                streaming JSONL reader, redaction, text helpers
 ui/                    the canvas: index.html, style.css, app.js, bundled font (no build step)
 scripts/demo-data.mjs  generates realistic sample sessions for UI work
+scripts/make-fixtures.mjs  regenerates fixtures/ (npm run fixtures)
 test/                  *.test.ts, one per module
 fixtures/              synthetic session files that mirror each tool's real layout
 docs/                  architecture, adapter guide, roadmap, README images
