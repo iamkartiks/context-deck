@@ -23,7 +23,7 @@ A local web app (`contextdeck ui`) served on `127.0.0.1`.
 - [x] Context health on every card: the card fills up as its window fills, with a line per compaction
 - [x] List view, live updates from watch mode, search that lights up matching cards
 - [x] Session reader: files changed, related sessions across tools, subagents, conversation with tool calls collapsed
-- [x] Resume: copy the command, or open it in Terminal (macOS)
+- [x] Resume: copy the command, or open it in a terminal (macOS, Linux, Windows)
 
 Still to do here:
 

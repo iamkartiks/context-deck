@@ -20,14 +20,15 @@ The UI is served by a small HTTP server that only listens on `127.0.0.1`. Becaus
 - **Static files** come from a fixed allow-list, so there is no path traversal.
 - **Request bodies** are capped at 2 MB and the saved layout is validated and normalised before it is written.
 
-**Open in Terminal** (macOS only) runs the session's own resume command (`claude --resume <id>` or `codex resume <id>`) in a new Terminal window. The command is built by ContextDeck from the indexed session, with every argument shell-quoted; nothing from the request other than the session id is used. It needs the token like every other write.
+**Open in Terminal** runs the session's own resume command (`claude --resume <id>` or `codex resume <id>`) in a new terminal window: Terminal on macOS, a terminal app found on your PATH on Linux, Windows Terminal or PowerShell on Windows. The command is built by ContextDeck from the indexed session, with every argument quoted for that system's shell; nothing from the request other than the session id is used. On Linux the terminal is started directly with an argument list (no shell in between). On Windows, where the command passes through a command line, anything containing a character that cmd.exe, Windows Terminal or PowerShell treats specially (`" % ^ & | < > ! ` $ ;` or a line break) is refused rather than escaped. It needs the token like every other write.
 
 **Handoffs** start a new agent session with a brief built from an existing one:
 
 - The brief is built from indexed text, which was already redacted, and the person sees and can edit all of it before anything starts.
 - Starting a handoff to a different tool sends the brief to that tool's provider. The UI says which company before you start.
 - Briefs are saved to `~/.contextdeck/handoffs/` with owner-only permissions (directory 0700, files 0600). The file name is a generated id checked against `hf_` plus 10 hex digits, so a request can't choose where a file is written.
-- The start command reads the brief with `$(cat '<file>')` inside double quotes, so the brief's contents are passed as one argument and never run as shell code. A test checks this with a brief full of `$(…)`, backticks and quotes.
+- On macOS and Linux the start command reads the brief with `$(cat '<file>')` inside double quotes, so the brief's contents are passed as one argument and never run as shell code. A test checks this with a brief full of `$(…)`, backticks and quotes.
+- On Windows the brief never goes on a command line. The tool is started with a one-line pointer to the brief file, built only from the session title (special characters removed), the brief's path and the marker. Reading an earlier brief back is done by handoff id, inside ContextDeck's own folder only.
 - Like every other write, `POST /api/handoff` needs the per-run token and a matching Origin. The target must be a known tool.
 
 `board.json` (your canvas arrangement) contains only session ids and coordinates.
