@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="contextdeck-token" content="__CONTEXTDECK_TOKEN__">
+  <meta name="color-scheme" content="light dark">
+  <title>ContextDeck</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="bar">
+    <a class="brand" href="/" aria-label="ContextDeck home">
+      <img src="/favicon.svg" alt="" width="26" height="26">
+      <span>ContextDeck</span>
+    </a>
+
+    <div class="search">
+      <label class="visually-hidden" for="q">Search every session</label>
+      <input id="q" type="search" placeholder="Search every session" autocomplete="off" spellcheck="false">
+      <kbd aria-hidden="true">/</kbd>
+    </div>
+
+    <div class="controls">
+      <div class="seg" role="group" aria-label="View">
+        <button type="button" data-view="canvas" aria-pressed="true">Canvas</button>
+        <button type="button" data-view="list" aria-pressed="false">List</button>
+      </div>
+      <div class="seg" role="group" aria-label="Group cards by" id="grouping">
+        <button type="button" data-group="workstream" aria-pressed="true" title="Sessions that edited the same files or share a feature branch, across tools">Workstream</button>
+        <button type="button" data-group="project" aria-pressed="false">Project</button>
+        <button type="button" data-group="tool" aria-pressed="false">Tool</button>
+        <button type="button" data-group="day" aria-pressed="false">Day</button>
+      </div>
+      <div class="tools" id="tool-filters" role="group" aria-label="Show sessions from"></div>
+    </div>
+
+    <div class="status">
+      <span id="status-text" aria-live="polite"></span>
+      <button type="button" class="quiet" id="rescan" title="Look for new and changed sessions now">Rescan</button>
+    </div>
+  </header>
+
+  <main id="main">
+    <section id="canvas" class="desk" aria-label="Session canvas. Drag the background to move around, drag cards to arrange them.">
+      <div id="world" class="world">
+        <svg id="edges" class="edges" aria-hidden="true"></svg>
+        <div id="zones"></div>
+        <div id="cards"></div>
+      </div>
+
+      <div id="empty" class="empty" hidden></div>
+
+      <div class="dock dock-left" role="toolbar" aria-label="Canvas">
+        <button type="button" id="zoom-out" aria-label="Zoom out">−</button>
+        <button type="button" id="zoom-reset" class="quiet zoom-level" title="Show everything">100%</button>
+        <button type="button" id="zoom-in" aria-label="Zoom in">+</button>
+        <button type="button" id="tidy" class="quiet" title="Put every card you moved back in its group" disabled>Tidy up</button>
+      </div>
+      <p class="legend dock-right">
+        <span class="legend-fill" aria-hidden="true"><i></i></span>
+        The fill is how full each context window is. Each line in it is a compaction. Threads join sessions that edited the same files.
+      </p>
+    </section>
+
+    <section id="list" class="list" hidden aria-label="Sessions"></section>
+
+    <aside id="results" class="results" hidden aria-label="Search results"></aside>
+
+    <aside id="reader" class="reader" hidden aria-labelledby="reader-title" tabindex="-1"></aside>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

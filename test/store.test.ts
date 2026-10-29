@@ -120,6 +120,23 @@ describe('Store + indexer', () => {
     assert.equal(shop?.sessions, 2);
   });
 
+  it('groups sessions into cross-tool workstreams', () => {
+    const g = store.workstreams();
+    const linked = g.workstreams.filter((w) => w.kind === 'linked');
+    assert.equal(linked.length, 1);
+    assert.equal(linked[0]!.label, 'session cookies', 'named after the shared feature branch');
+    assert.deepEqual(linked[0]!.providers, ['claude-code', 'codex']);
+    assert.equal(linked[0]!.sessionIds.length, 2);
+    // Every top-level session lands in exactly one group; subagents are left out
+    const all = g.workstreams.flatMap((w) => w.sessionIds);
+    assert.equal(all.length, 4);
+    assert.equal(new Set(all).size, 4);
+    assert.ok(!all.some((id) => id.includes('/agent-')));
+    assert.equal(g.edges.length, 1);
+    assert.deepEqual(g.edges[0]!.files.sort(), ['/Users/alice/code/acme-shop/src/auth/session.ts']);
+    assert.equal(g.sessionWorkstream[linked[0]!.sessionIds[0]!], linked[0]!.id);
+  });
+
   it('returns messages in order, optionally only the last N and certain roles', () => {
     const id = store.resolve('cc:0f3a1b11').id;
     const last = store.messages(id, { last: 2, roles: ['user', 'assistant'] });

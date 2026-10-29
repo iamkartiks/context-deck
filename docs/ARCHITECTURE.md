@@ -6,8 +6,8 @@ ContextDeck has three layers. Data only flows one way: from the agents' files in
  provider files (read-only)        normalise               index (cache)                consumers
  ─────────────────────────         ─────────               ─────────────                ─────────
  ~/.claude/projects/**.jsonl ──▶  claude-code adapter ─┐
-                                                       ├─▶  Store (SQLite) ──▶  CLI (today)
- ~/.codex/sessions/**.jsonl  ──▶  codex adapter ───────┘     sessions              UI (next)
+                                                       ├─▶  Store (SQLite) ──▶  CLI
+ ~/.codex/sessions/**.jsonl  ──▶  codex adapter ───────┘     sessions              UI server ─▶ canvas (ui/)
                                      │                       messages + FTS5       library users
                                      └── redact + truncate   session_files
 ```
@@ -56,9 +56,43 @@ The index is a cache. Its schema is versioned in `meta.schema_version`; when it 
 - `project` is the folder name of the cwd. Resolving the git root would group subfolders of one repo together.
 - Session titles aren't in the full-text index yet; only messages are.
 
-## 4. Consumers
+## 4. Workstreams (`Store.workstreams()`)
 
-The CLI (`src/cli.ts`) is a thin layer over the store. Every command supports `--json`, and that output is the contract the UI will build on. Changing its shape is a breaking change.
+A workstream is work that spans sessions, often across tools. Sessions are joined (union-find) when:
+
+- they edited the same file (resolved to an absolute path against each session's cwd), ignoring files so common they'd join everything (`package.json`, lockfiles, `README.md`…, or any file touched by more than 8 sessions), or
+- they ran in the same folder on the same feature branch (`main`, `master`, `develop` and similar don't count).
+
+Linked groups are named after their feature branch, or else after the files that tie them together. Sessions that link to nothing are gathered per project as "loose" groups. The shared-file pairs are returned as `edges`, which the canvas draws as threads.
+
+## 5. Consumers
+
+The CLI (`src/cli.ts`) is a thin layer over the store. Every command supports `--json`; changing its shape is a breaking change.
+
+### The UI server (`src/server.ts`)
+
+`contextdeck ui` indexes, then starts a `node:http` server on `127.0.0.1`. It serves the files in `ui/` from a fixed allow-list and a small JSON API:
+
+| Route | |
+|---|---|
+| `GET /api/board` | All top-level sessions, workstreams, edges, subagent counts, providers, capabilities |
+| `GET /api/session/:id` | One session: messages (last 600), files, related, subagents, resume command |
+| `GET /api/search?q=` | Full-text search hits with snippets |
+| `GET /api/events` | Server-sent events; `index` fires whenever the watcher re-indexes |
+| `GET` / `PUT /api/layout` | Hand-placed card positions, stored in `board.json` (not in the index, so rebuilding the index never loses them) |
+| `POST /api/reindex` | Rescan now |
+| `POST /api/open-terminal` | macOS: run a session's resume command in Terminal |
+
+Writes need the per-run token embedded in the page; see [SECURITY.md](../SECURITY.md) for the full model.
+
+### The canvas (`ui/`)
+
+`index.html`, `style.css` and `app.js`: no framework, no build step, no dependencies. It is one ES module with plain DOM rendering (cards are reused between renders, zones and threads are redrawn). Worth knowing before changing it:
+
+- **Layout** is computed in the browser. Each group becomes a zone sized to its cards; zones are shelf-packed, trying many row widths and keeping the one whose shape best fits the screen. Hand-placed positions override the automatic ones, per grouping, and zones stretch around wherever their cards actually are.
+- **Session text is never parsed as HTML.** Everything goes through `h()`, which creates text nodes. Search highlights come back from the server as `«…»` markers and are turned into `<mark>` elements by splitting strings.
+- **Context fill** uses the real window for Codex and an estimate for Claude Code (200k, or 1M once a session has gone past 200k), shown with a dashed line.
+- Browser storage holds only view preferences (view, grouping, hidden tools) and is optional.
 
 ## Why these choices
 

@@ -6,6 +6,7 @@ import { getAdapter } from './adapters/index.js';
 import { loadConfig, type Config } from './config.js';
 import { ago, bytes, c, contextUsage, indent, providerLabel, table, tokens } from './format.js';
 import { indexSources, watchSources, type IndexSummary } from './indexer.js';
+import { openBrowser, startUiServer } from './server.js';
 import type { SessionRow } from './schema.js';
 import { Store } from './store.js';
 import { zstdSupported } from './util/jsonl.js';
@@ -32,6 +33,7 @@ ${c.bold('Commands')}
   resume <id>         Print (or --run) the command that reopens a session in its own tool
   related <id>        Sessions in any tool that touched the same files
   projects            Sessions grouped by working directory, across tools
+  ui                  Open the visual canvas in your browser (local only)
   watch               Keep the index up to date as you work
   stats               What's in the index
   doctor              Check paths, Node features and parse errors
@@ -48,7 +50,12 @@ ${c.bold('Paths')} (flag > env var > default)
       --claude-dir <dir>  Claude Code dir      CONTEXTDECK_CLAUDE_DIR  $CLAUDE_CONFIG_DIR or ~/.claude
       --codex-dir <dir>   Codex dir            CONTEXTDECK_CODEX_DIR   $CODEX_HOME or ~/.codex
 
+${c.bold('UI options')}
+      --port <n>        Port for \`ui\` (default 4977; the next free one is used if taken)
+      --no-open         Don't open the browser automatically
+
 ${c.bold('Examples')}
+  contextdeck ui
   contextdeck index
   contextdeck search "rate limit" --provider codex
   contextdeck show cc:1a2b3c4d
@@ -70,6 +77,8 @@ const OPTIONS = {
   project: { type: 'string' },
   limit: { type: 'string', short: 'n' },
   messages: { type: 'string', short: 'm' },
+  port: { type: 'string' },
+  'no-open': { type: 'boolean' },
   home: { type: 'string' },
   'claude-dir': { type: 'string' },
   'codex-dir': { type: 'string' },
@@ -342,6 +351,34 @@ async function cmdWatch(cfg: Config, store: Store, v: Values): Promise<void> {
   });
 }
 
+async function cmdUi(cfg: Config, store: Store, v: Values): Promise<void> {
+  let port = 4977;
+  if (v.port !== undefined) {
+    port = Number(v.port);
+    if (!Number.isInteger(port) || port < 0 || port > 65535) throw new UsageError('--port must be a number from 0 to 65535');
+  }
+  const tty = process.stdout.isTTY;
+  if (tty) process.stdout.write(c.dim('Indexing…\r'));
+  const first = await indexSources(store, cfg.sources);
+  process.stdout.write((tty ? '\x1b[K' : '') + summaryLine(first) + '\n');
+
+  const server = await startUiServer(store, cfg, { port, initialIndex: first });
+  process.stdout.write(
+    `\n${c.bold('ContextDeck is open at')} ${c.cyan(server.url)}\n` +
+      c.dim('Only this computer can reach it. Keeps updating as your agents work. Ctrl+C to stop.\n'),
+  );
+  if (!v['no-open']) openBrowser(server.url);
+
+  await new Promise<void>((done) => {
+    const stop = () => {
+      process.stdout.write(c.dim('\nStopping…\n'));
+      server.close().then(done, done);
+    };
+    process.once('SIGINT', stop);
+    process.once('SIGTERM', stop);
+  });
+}
+
 function cmdStats(cfg: Config, store: Store, v: Values): void {
   const st = store.stats();
   print(!!v.json, { dbPath: cfg.dbPath, ...st }, () => {
@@ -459,6 +496,10 @@ export async function main(argv: string[]): Promise<number> {
         break;
       case 'watch':
         await cmdWatch(cfg, store, v);
+        break;
+      case 'ui':
+      case 'open':
+        await cmdUi(cfg, store, v);
         break;
       case 'stats':
         cmdStats(cfg, store, v);

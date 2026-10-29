@@ -1,7 +1,7 @@
 {
   "name": "contextdeck",
-  "version": "0.1.0",
-  "description": "One local index for every AI coding agent session (Claude Code, Codex, and more). Search, organise and resume your context windows across tools.",
+  "version": "0.2.0",
+  "description": "One local canvas for every AI coding agent session (Claude Code, Codex, and more). Search, organise and resume your context windows across tools.",
   "keywords": [
     "claude-code",
     "codex",
@@ -29,6 +29,7 @@
   "files": [
     "bin",
     "dist/src",
+    "ui",
     "README.md",
     "LICENSE"
   ],
@@ -41,7 +42,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --no-warnings --test \"dist/test/**/*.test.js\"",
     "demo": "npm run build && node bin/contextdeck.js --home .demo --claude-dir fixtures/claude --codex-dir fixtures/codex index && node bin/contextdeck.js --home .demo --claude-dir fixtures/claude --codex-dir fixtures/codex list",
-    "prepublishOnly": "npm test"
+    "prepublishOnly": "npm test",
+    "demo:ui": "npm run build && node scripts/demo-data.mjs .demo-data && node bin/contextdeck.js ui --home .demo-ui --claude-dir .demo-data/claude --codex-dir .demo-data/codex"
   },
   "devDependencies": {
     "@types/node": "^22.13.0",
