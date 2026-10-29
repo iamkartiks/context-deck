@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { appendFileSync, rmSync, utimesSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { loadConfig } from '../src/config.js';
@@ -25,6 +25,60 @@ describe('downsampleSeries', () => {
   });
 });
 
+describe('index size', () => {
+  it('stores each message once, searches it, and gives space back when sessions go', async () => {
+    const s = scratch();
+    try {
+      // Three large synthetic sessions (~1.5 MB of text each)
+      const dir = join(s.claude, 'projects/-big');
+      mkdirSync(dir, { recursive: true });
+      const para = 'The payment module retries failed charges with exponential backoff and records each attempt. ';
+      for (let n = 0; n < 3; n++) {
+        const id = `bbbbbbbb-0000-4000-8000-00000000000${n}`;
+        const lines = [];
+        for (let t = 0; t < 250; t++) {
+          lines.push(JSON.stringify({ type: 'user', sessionId: id, cwd: '/big', timestamp: '2026-10-29T00:00:00Z', message: { role: 'user', content: `step ${t} uniqueword${n}x${t} ${para.repeat(20)}` } }));
+          lines.push(JSON.stringify({ type: 'assistant', sessionId: id, cwd: '/big', timestamp: '2026-10-29T00:00:01Z', message: { id: `m${t}`, role: 'assistant', content: [{ type: 'text', text: para.repeat(40) }] } }));
+        }
+        writeFileSync(join(dir, `${id}.jsonl`), lines.join('\n') + '\n');
+      }
+      const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex }, {});
+      const store = new Store(cfg.dbPath);
+      await indexSources(store, cfg.sources);
+
+      // No second copy of the text in the search index
+      const db = new DatabaseSync(cfg.dbPath);
+      const tables = (db.prepare(`SELECT name FROM sqlite_master WHERE name LIKE 'messages_fts%'`).all() as { name: string }[]).map((r) => r.name);
+      assert.ok(!tables.includes('messages_fts_content'), tables.join(','));
+      db.close();
+
+      assert.equal(store.search('uniqueword1x7').length, 1);
+      assert.match(store.search('uniqueword1x7')[0]!.snippet, /«uniqueword1x7»/);
+
+      // Re-indexing a changed session leaves no stale search entries
+      const file = join(dir, 'bbbbbbbb-0000-4000-8000-000000000001.jsonl');
+      writeFileSync(file, readFileSync(file, 'utf8').replace(/uniqueword1x7 /, 'replacedword ') );
+      const later = new Date(Date.now() + 5000);
+      utimesSync(file, later, later);
+      await indexSources(store, cfg.sources);
+      assert.equal(store.search('uniqueword1x7').length, 0);
+      assert.equal(store.search('replacedword').length, 1);
+
+      // Removing sessions hands the space back
+      const before = statSync(cfg.dbPath).size;
+      rmSync(join(dir, 'bbbbbbbb-0000-4000-8000-000000000000.jsonl'));
+      rmSync(join(dir, 'bbbbbbbb-0000-4000-8000-000000000002.jsonl'));
+      await indexSources(store, cfg.sources);
+      const after = statSync(cfg.dbPath).size;
+      assert.ok(after < before * 0.6, `index went from ${before} to ${after} bytes`);
+      assert.equal(store.search('uniqueword0x3').length, 0);
+      store.close();
+    } finally {
+      s.cleanup();
+    }
+  });
+});
+
 describe('index upgrade', () => {
   it('adds the context column to a v1 index and rebuilds it', async () => {
     const s = scratch();
@@ -45,6 +99,14 @@ describe('index upgrade', () => {
       assert.equal(sum.indexed, 5);
       assert.deepEqual(store.contextSeries(store.resolve('cc:0f3a1b11').id), { points: [16_500, 19_500, 44_000], compactions: [2] });
       store.close();
+
+      // The upgraded file uses the compact layout
+      const check = new DatabaseSync(cfg.dbPath);
+      const one = (sql: string) => Object.values(check.prepare(sql).get() as Record<string, unknown>)[0];
+      assert.equal(one('PRAGMA page_size'), 16384);
+      assert.equal(one('PRAGMA auto_vacuum'), 2, 'incremental');
+      assert.match(String(one(`SELECT sql FROM sqlite_master WHERE name = 'messages_fts'`)), /content = 'messages'/);
+      check.close();
     } finally {
       s.cleanup();
     }
