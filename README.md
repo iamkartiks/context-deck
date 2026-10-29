@@ -198,7 +198,7 @@ Or click the **≈** button next to the search box in the canvas. ContextDeck ch
 
 The **cutoff** is the lowest score a match by meaning needs. It trades those two off, and each model scores on its own scale. The script tries every cutoff and suggests the best one for your model; apply it with `contextdeck semantic enable --min-score <n>` (`auto` goes back to the default). Try other models with `-- --model bge-m3`, and `-- --json` gives the full results to share.
 
-With `qwen3-embedding:0.6b`, the first version of this test (no look-alikes) found the right session first for all 30 questions, in all three languages, where word search found none.
+Measured with `qwen3-embedding:0.6b`, word search found none of the right sessions. Search by meaning put the right one first for 25 of 30 questions (English 9, Hindi 8, Hinglish 8), and in the top 3 for 29. Its cutoff now defaults to the measured **0.50**: at that level, 15 of 18 questions with no answer get nothing added (at the old 0.1, none did), with no right answers lost. Other models use a generic cutoff until measured; `semantic enable` tells you when that's the case.
 
 The model server must be on this computer. Pointing ContextDeck at one elsewhere sends your session text there, so it's refused unless you add `--allow-remote` on the command line; the canvas never allows it.
 

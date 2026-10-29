@@ -12,6 +12,11 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
   - it tries every cutoff and suggests the best one for your model, showing the trade-off;
   - `--verbose` shows each question's scores, and `--json` gives the full results.
 - `contextdeck semantic enable --min-score <0-1|auto>` sets the cutoff. `semantic` and `doctor` show it.
+- **Measured cutoff for `qwen3-embedding:0.6b`: 0.50.**
+  - Right answers scored 0.43–0.92 (median 0.66). The best match for questions with no answer scored 0.35–0.56 (median 0.48).
+  - At 0.50, 25 of 30 right answers come first (as before) and 15 of 18 no-answer questions get nothing added (before: none).
+  - Other models keep the generic floor, and `semantic enable` points to `npm run eval:meaning`.
+- `eval:meaning`: when several cutoffs are equally good, it now suggests the one that finds the most right answers.
 
 ### Fixed
 

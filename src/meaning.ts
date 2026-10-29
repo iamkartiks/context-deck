@@ -1,5 +1,5 @@
 import { checkAllowed, createEmbedder, EmbedError, type Embedder } from './embedder.js';
-import { catchUp, combine, defaultMinScore, searchByMeaning, type CombinedHit, type Progress } from './semantic.js';
+import { catchUp, combine, defaultMinScore, hasMeasuredCutoff, searchByMeaning, type CombinedHit, type Progress } from './semantic.js';
 import { DEFAULT_URLS, loadSettings, saveSettings, type SemanticSettings } from './settings.js';
 import type { SearchHit, Store } from './store.js';
 
@@ -50,6 +50,11 @@ export class MeaningService {
 
   get enabled(): boolean {
     return this.settings.enabled;
+  }
+
+  /** True when neither you nor a measurement set the cutoff for this model. */
+  cutoffIsGeneric(): boolean {
+    return this.settings.minScore == null && !hasMeasuredCutoff(this.settings.model);
   }
 
   private embedder(): Embedder {
