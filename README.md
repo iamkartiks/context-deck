@@ -8,7 +8,7 @@ If you use more than one coding agent, your context is scattered: Claude Code ke
 contextdeck ui
 ```
 
-![The ContextDeck canvas: sessions from Claude Code (yellow), Codex (grey) and Qwen Code (violet) as cards on a dotted board, grouped into workstreams like "session cookies" and "offline sync". Each card fills up to show how full its context window is.](docs/images/canvas.png)
+![The ContextDeck canvas: sessions from Claude Code (yellow), Codex (grey) and Qwen Code (violet) as cards on a dotted board, grouped into workstreams like "offline sync" and "dedupe.py and events.py". Each card fills up to show how full its context window is.](docs/images/canvas.png)
 
 Every session is a card on a canvas. Cards from both tools gather into **workstreams**: sessions that edited the same files or ran on the same feature branch, whichever tool they ran in. Each card **fills up like a glass** to show how full its context window is, with a line for every time it was compacted, and groups that were active in the last hour **glow**. Drag cards wherever you like and ContextDeck remembers, or **Tidy up** into a neat grid. Click one to read it: how its context grew turn by turn, what it changed, what it's related to, and how to jump back in.
 
