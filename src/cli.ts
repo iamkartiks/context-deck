@@ -7,6 +7,8 @@ import { loadConfig, type Config } from './config.js';
 import { ago, bytes, c, contextUsage, indent, providerLabel, table, tokens } from './format.js';
 import { indexSources, watchSources, type IndexSummary } from './indexer.js';
 import { openBrowser, startUiServer } from './server.js';
+import { adapterByPrefix } from './adapters/index.js';
+import { buildBrief, saveBrief, startLine } from './handoff.js';
 import type { SessionRow } from './schema.js';
 import { Store } from './store.js';
 import { zstdSupported } from './util/jsonl.js';
@@ -31,6 +33,7 @@ ${c.bold('Commands')}
   search <query>      Full-text search across every session ("quoted phrase", prefix*)
   show <id>           Session details, files touched and the last messages
   resume <id>         Print (or --run) the command that reopens a session in its own tool
+  handoff <id>        Continue a session's work in a new session, in any tool
   related <id>        Sessions in any tool that touched the same files
   projects            Sessions grouped by working directory, across tools
   ui                  Open the visual canvas in your browser (local only)
@@ -50,6 +53,12 @@ ${c.bold('Paths')} (flag > env var > default)
       --claude-dir <dir>  Claude Code dir      CONTEXTDECK_CLAUDE_DIR  $CLAUDE_CONFIG_DIR or ~/.claude
       --codex-dir <dir>   Codex dir            CONTEXTDECK_CODEX_DIR   $CODEX_HOME or ~/.codex
 
+${c.bold('Handoff options')}
+  -t, --to <tool>       Tool to continue in: codex (cx) or claude-code (cc). Default: the other tool
+      --print           Only print the brief
+      --run             Start the new session right here in this terminal
+      --no-check-in     Let the new agent carry on without checking in first
+
 ${c.bold('UI options')}
       --port <n>        Port for \`ui\` (default 4977; the next free one is used if taken)
       --no-open         Don't open the browser automatically
@@ -60,6 +69,7 @@ ${c.bold('Examples')}
   contextdeck search "rate limit" --provider codex
   contextdeck show cc:1a2b3c4d
   contextdeck resume cx:9f8e7d6c --run
+  contextdeck handoff cc:1a2b3c4d --to codex --run
 
 Everything stays on this machine. Session files are only ever read, never changed.
 `;
@@ -79,6 +89,9 @@ const OPTIONS = {
   messages: { type: 'string', short: 'm' },
   port: { type: 'string' },
   'no-open': { type: 'boolean' },
+  to: { type: 'string', short: 't' },
+  print: { type: 'boolean' },
+  'no-check-in': { type: 'boolean' },
   home: { type: 'string' },
   'claude-dir': { type: 'string' },
   'codex-dir': { type: 'string' },
@@ -351,6 +364,55 @@ async function cmdWatch(cfg: Config, store: Store, v: Values): Promise<void> {
   });
 }
 
+async function cmdHandoff(cfg: Config, store: Store, v: Values, args: string[]): Promise<void> {
+  const ref = args[0];
+  if (!ref) throw new UsageError('Usage: contextdeck handoff <id> [--to codex|claude-code] [--print | --run]');
+  const from = store.resolve(ref);
+  const to = v.to ? adapterByPrefix(v.to)?.id : from.provider === 'codex' ? 'claude-code' : 'codex';
+  const target = to ? getAdapter(to) : undefined;
+  if (!to || !target?.startCommand) throw new UsageError(`Unknown tool "${v.to}". Use codex (cx) or claude-code (cc).`);
+
+  const brief = buildBrief(store, from.id, { to, checkIn: !v['no-check-in'] });
+  if (v.print) {
+    process.stdout.write(brief.text);
+    return;
+  }
+  const path = saveBrief(cfg.home, brief.handoffId, brief.text);
+  const line = startLine(target, from.cwd, path);
+
+  if (!v.run) {
+    print(!!v.json, { handoffId: brief.handoffId, path, command: line, tokens: brief.tokens }, () =>
+      [
+        `${c.bold('Brief ready')} ${c.dim(`(${brief.handoffId}, about ${tokens(brief.tokens)} tokens)`)}`,
+        `  ${path}`,
+        '',
+        `${c.bold(`Start it in ${target.label}`)} ${c.dim('(or run this command again with --run)')}`,
+        `  ${line}`,
+        '',
+        c.dim(`Read or edit the brief first if you like. ContextDeck links the new session to ${from.shortId} once it starts.`),
+      ].join('\n'),
+    );
+    return;
+  }
+
+  const start = target.startCommand()!;
+  const cwd = from.cwd && existsSync(from.cwd) ? from.cwd : process.cwd();
+  if (from.cwd && cwd !== from.cwd) process.stderr.write(c.yellow(`Note: ${from.cwd} no longer exists; starting here.\n`));
+  process.stderr.write(c.dim(`Starting ${target.label} with the brief (${brief.handoffId})…\n`));
+  await new Promise<void>((resolveRun, reject) => {
+    const child = spawn(start.command, [...start.args, brief.text], { cwd, stdio: 'inherit' });
+    child.on('error', (err) =>
+      reject(
+        (err as NodeJS.ErrnoException).code === 'ENOENT' ? new Error(`\`${start.command}\` is not installed or not on your PATH.`) : err,
+      ),
+    );
+    child.on('exit', (code) => {
+      process.exitCode = code ?? 0;
+      resolveRun();
+    });
+  });
+}
+
 async function cmdUi(cfg: Config, store: Store, v: Values): Promise<void> {
   let port = 4977;
   if (v.port !== undefined) {
@@ -484,6 +546,10 @@ export async function main(argv: string[]): Promise<number> {
         break;
       case 'show':
         cmdShow(store, v, args);
+        break;
+      case 'handoff':
+      case 'continue':
+        await cmdHandoff(cfg, store, v, args);
         break;
       case 'resume':
         await cmdResume(store, v, args);

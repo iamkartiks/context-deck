@@ -199,6 +199,7 @@ const els = {
   layoutToggle: $('#layout-toggle'),
   chips: $('#tool-filters'),
   rescan: $('#rescan'),
+  composer: $('#composer'),
 };
 
 let toastTimer = 0;
@@ -507,7 +508,8 @@ function renderThreads() {
       Math.abs(dx) >= Math.abs(dy)
         ? `M${ax},${ay} C${ax + dx / 2},${ay} ${bx - dx / 2},${by} ${bx},${by}`
         : `M${ax},${ay} C${ax},${ay + dy / 2} ${bx},${by - dy / 2} ${bx},${by}`;
-    paths.push(s('path', { d, class: focus && (e.a === focus || e.b === focus) ? 'on' : null }));
+    const cls = [e.kind === 'handoff' ? 'handoff' : '', focus && (e.a === focus || e.b === focus) ? 'on' : ''].filter(Boolean).join(' ');
+    paths.push(s('path', { d, class: cls || null }));
   }
   els.threads.replaceChildren(...paths);
 }
@@ -996,6 +998,40 @@ function renderReader() {
       )
     : null;
 
+  const targets = sess.isSubagent ? [] : (caps.handoffTargets ?? []);
+  const others = targets.filter((t) => t.id !== sess.provider);
+  const same = targets.find((t) => t.id === sess.provider);
+  const nearlyFull = (ctx?.pct ?? 0) >= 0.8;
+  const handoff = targets.length
+    ? h(
+        'section',
+        { class: 'section' },
+        h('div', { class: 'label' }, 'Continue in a new session'),
+        h(
+          'div',
+          { class: 'handoff-actions' },
+          others.map((t) =>
+            h('button', { type: 'button', class: 'pill outline', dataset: { tool: t.id }, onclick: () => openHandoff(sess.id, t.id) }, swatch(t.id), `Continue in ${t.label}`),
+          ),
+          same
+            ? h(
+                'button',
+                { type: 'button', class: `pill ${nearlyFull ? 'solid' : 'outline'}`, dataset: { tool: same.id }, onclick: () => openHandoff(sess.id, same.id) },
+                swatch(same.id),
+                `Fresh ${same.label} session`,
+              )
+            : null,
+        ),
+        h(
+          'p',
+          { class: 'note' },
+          nearlyFull
+            ? 'This window is nearly full. A fresh session with a brief from this one gives the next step room to think.'
+            : 'Writes a brief from this session so a new agent can pick up where it left off. You read and edit it before anything starts.',
+        ),
+      )
+    : null;
+
   const compLine = sess.compactions ? `compacted ${times(sess.compactions)}` : 'never compacted';
   let context = null;
   if (ctx) {
@@ -1021,7 +1057,8 @@ function renderReader() {
         ? [sparkline(series, ctx.window, `Context over the session, ${compLine}`), h('div', { class: 'spark-axis' }, h('span', {}, 'start'), h('span', {}, compLine), h('span', {}, 'now'))]
         : null,
       ctx.estimated ? h('p', { class: 'note' }, 'Claude Code doesn’t record its window size, so 200k is assumed.') : null,
-      ctx.pct >= 0.8 ? h('p', { class: 'advice' }, 'Nearly full. Consider starting a fresh session for the next task.') : null,
+      // When handoff is available, its section already says this
+      ctx.pct >= 0.8 && !targets.length ? h('p', { class: 'advice' }, 'Nearly full. Consider starting a fresh session for the next task.') : null,
     );
   }
 
@@ -1039,9 +1076,13 @@ function renderReader() {
   const related = d.related.map((r) =>
     linkCard(
       r.session,
-      r.reason === 'shared-files'
-        ? `Both edited ${shortPath(r.sharedFiles[0], r.session.cwd)}${r.sharedFiles.length > 1 ? ` and ${plural(r.sharedFiles.length - 1, 'other file')}` : ''}`
-        : `Same branch: ${r.session.gitBranch}`,
+      r.reason === 'continued-from'
+        ? 'The earlier session this one continues'
+        : r.reason === 'continued-in'
+          ? 'Continues this session'
+          : r.reason === 'shared-files'
+            ? `Both edited ${shortPath(r.sharedFiles[0], r.session.cwd)}${r.sharedFiles.length > 1 ? ` and ${plural(r.sharedFiles.length - 1, 'other file')}` : ''}`
+            : `Same branch: ${r.session.gitBranch}`,
     ),
   );
 
@@ -1084,6 +1125,7 @@ function renderReader() {
       ),
       h('h2', { id: 'reader-title' }, sess.title),
       resume,
+      handoff,
       context,
       h('dl', { class: 'facts' }, facts.flatMap(([k, v]) => [h('dt', {}, k), h('dd', { title: k === 'Id' ? sess.id : null }, v)])),
       h(
@@ -1128,6 +1170,219 @@ function renderReader() {
   els.reader.hidden = false;
   els.reader.scrollTop = 0;
 }
+
+// ── Handoff composer ─────────────────────────────────────────────────────
+
+const COMPANY = { 'claude-code': 'Anthropic', codex: 'OpenAI' };
+// Step 3 of the brief, in its two forms (must match src/handoff.ts)
+const CHECK_IN_STEP = '3. Then reply with a short summary of where things stand and the next step you propose, and wait for my go-ahead before changing any files.';
+const CARRY_ON_STEP = '3. Then carry on with the next step.';
+
+let composer = null;
+/** Edited briefs survive closing and reopening the composer, per session and target. */
+const drafts = new Map();
+
+async function openHandoff(sessionId, to) {
+  const key = `${sessionId}→${to}`;
+  const draft = drafts.get(key);
+  const qs = new URLSearchParams({ id: sessionId, to, checkIn: draft?.checkIn === false ? '0' : '1' });
+  if (draft) qs.set('handoffId', draft.handoffId);
+  let preview;
+  try {
+    preview = await api(`/api/handoff/preview?${qs}`);
+  } catch (err) {
+    toast(err.message);
+    return;
+  }
+  composer = { key, sessionId, to, preview, checkIn: draft?.checkIn ?? true, returnFocus: document.activeElement };
+  renderComposer(draft?.text ?? preview.brief);
+}
+
+/** While the composer is open, everything behind it is unreachable by keyboard and screen readers. */
+function setBackgroundInert(on) {
+  for (const el of [$('.bar'), els.board, els.list, els.reader]) el.inert = on;
+}
+
+function closeComposer() {
+  if (!composer) return;
+  const back = composer.returnFocus;
+  composer = null;
+  setBackgroundInert(false);
+  els.composer.hidden = true;
+  els.composer.replaceChildren();
+  if (back?.isConnected) back.focus({ preventScroll: true });
+}
+
+function renderComposer(text) {
+  const c = composer;
+  const p = c.preview;
+  const same = p.from.provider === p.to;
+
+  const ta = h('textarea', { class: 'brief', id: 'brief', spellcheck: 'false', 'aria-describedby': 'brief-meta' });
+  ta.value = text;
+  const meta = h('span', { class: 'brief-meta', id: 'brief-meta' });
+  const saveDraft = () => drafts.set(c.key, { text: ta.value, handoffId: p.handoffId, checkIn: c.checkIn });
+  const updateMeta = () => {
+    const n = Math.ceil(ta.value.length / 4);
+    const pct = p.targetWindow ? (n / p.targetWindow) * 100 : null;
+    meta.textContent = `about ${tokens(n)} tokens${pct != null ? ` · ${pct < 1 ? pct.toFixed(1) : Math.round(pct)}% of a new ${p.toLabel} window` : ''}`;
+  };
+  ta.addEventListener('input', () => {
+    saveDraft();
+    updateMeta();
+  });
+  updateMeta();
+
+  const checkIn = h('input', {
+    type: 'checkbox',
+    checked: c.checkIn,
+    onchange: (e) => {
+      const on = e.target.checked;
+      const [from, to] = on ? [CARRY_ON_STEP, CHECK_IN_STEP] : [CHECK_IN_STEP, CARRY_ON_STEP];
+      if (ta.value.includes(from)) {
+        ta.value = ta.value.replace(from, to);
+        c.checkIn = on;
+        saveDraft();
+        updateMeta();
+      } else {
+        e.target.checked = !on;
+        toast('That step isn’t in your edited brief any more, so nothing was changed.');
+      }
+    },
+  });
+
+  const busy = (on) => {
+    for (const b of els.composer.querySelectorAll('.composer-actions button')) b.disabled = on;
+  };
+  const launch = async (openTerminal) => {
+    busy(true);
+    try {
+      const res = await api('/api/handoff', {
+        method: 'POST',
+        body: { id: c.sessionId, to: c.to, handoffId: p.handoffId, brief: ta.value, launch: openTerminal },
+      });
+      drafts.delete(c.key);
+      if (openTerminal) {
+        toast(`Started in ${p.toLabel}. The new session shows up here once it begins.`);
+        closeComposer();
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(res.command);
+        toast('Command copied. Paste it into a terminal to start the new session.');
+        closeComposer();
+      } catch {
+        // No clipboard access: show the command so it can be copied by hand
+        cmd.textContent = res.command;
+        cmd.hidden = false;
+        busy(false);
+      }
+    } catch (err) {
+      toast(err.message);
+      busy(false);
+    }
+  };
+  const cmd = h('code', { class: 'composer-cmd', hidden: true });
+
+  const notes = [
+    p.crossProvider
+      ? h('p', { class: 'note' }, `Starting it sends this brief to ${COMPANY[p.to] ?? p.toLabel} (${p.toLabel}). Secrets were removed when the session was indexed, but read it through first.`)
+      : null,
+    p.cwd && !p.cwdExists
+      ? h('p', { class: 'warn' }, `The project folder ${p.cwd} isn’t on this computer any more, so the new session will start in your home folder.`)
+      : null,
+    !p.cwd ? h('p', { class: 'warn' }, 'This session didn’t record its project folder, so the new session will start in your home folder.') : null,
+  ];
+
+  const dialog = h(
+    'section',
+    { class: 'composer', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'composer-title', dataset: { tool: p.to } },
+    h(
+      'div',
+      { class: 'composer-head' },
+      h(
+        'div',
+        {},
+        h('div', { class: 'label' }, `Hand off · from ${p.fromLabel}`),
+        h('h2', { id: 'composer-title' }, same ? `Start a fresh ${p.toLabel} session` : `Continue in ${p.toLabel}`),
+      ),
+      h(
+        'button',
+        { type: 'button', class: 'close', 'aria-label': 'Close', onclick: closeComposer },
+        (() => {
+          const svg = s('svg', { width: 12, height: 12, viewBox: '0 0 12 12', 'aria-hidden': 'true' });
+          svg.append(s('path', { d: 'M2 2 L10 10 M10 2 L2 10' }));
+          return svg;
+        })(),
+      ),
+    ),
+    h(
+      'p',
+      { class: 'composer-lede' },
+      `${p.toLabel} starts a new session${p.cwd && p.cwdExists ? ' in ' : ''}`,
+      p.cwd && p.cwdExists ? h('code', {}, p.cwd) : null,
+      ' with this brief as its first message. It’s written from this session. Edit anything you like.',
+    ),
+    notes,
+    h('label', { class: 'visually-hidden', for: 'brief' }, 'Brief for the new session'),
+    ta,
+    h('div', { class: 'composer-meta' }, meta, h('label', { class: 'toggle' }, checkIn, 'Check in before changing files')),
+    cmd,
+    h(
+      'div',
+      { class: 'composer-actions' },
+      p.canOpenTerminal ? h('button', { type: 'button', class: 'pill solid', onclick: () => launch(true) }, 'Open in Terminal') : null,
+      h('button', { type: 'button', class: `pill ${p.canOpenTerminal ? 'outline' : 'solid'}`, onclick: () => launch(false) }, 'Copy command'),
+      h(
+        'button',
+        {
+          type: 'button',
+          class: 'pill outline',
+          onclick: async () => {
+            try {
+              await navigator.clipboard.writeText(ta.value);
+              toast('Brief copied.');
+            } catch {
+              ta.select();
+              toast('Press ⌘C to copy the selected brief.');
+            }
+          },
+        },
+        'Copy brief',
+      ),
+      h('button', { type: 'button', class: 'text-button', onclick: closeComposer }, 'Cancel'),
+    ),
+  );
+
+  els.composer.replaceChildren(dialog);
+  els.composer.hidden = false;
+  setBackgroundInert(true);
+  ta.focus({ preventScroll: true });
+  ta.setSelectionRange(0, 0);
+  ta.scrollTop = 0;
+}
+
+(function attachComposerEvents() {
+  // Click outside the dialog closes it
+  els.composer.addEventListener('pointerdown', (e) => {
+    if (e.target === els.composer) closeComposer();
+  });
+  // Keep Tab inside the dialog
+  els.composer.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab') return;
+    const items = [...els.composer.querySelectorAll('button:not([disabled]), textarea, input')].filter((x) => x.offsetParent);
+    if (!items.length) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  });
+})();
 
 // ── Header ────────────────────────────────────────────────────────────────
 
@@ -1219,11 +1474,12 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === 'Escape') {
+    if (composer) return closeComposer();
     if (e.target === els.q && els.q.value) return clearSearch();
     if (state.selected) return closeReader();
     if (state.search) return clearSearch();
   }
-  if (typing || state.view !== 'canvas' || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (composer || typing || state.view !== 'canvas' || e.metaKey || e.ctrlKey || e.altKey) return;
   const r = els.board.getBoundingClientRect();
   if (e.key === '+' || e.key === '=') zoomAt(1.15, r.width / 2, r.height / 2);
   else if (e.key === '-') zoomAt(1 / 1.15, r.width / 2, r.height / 2);

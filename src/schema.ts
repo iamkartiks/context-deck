@@ -92,6 +92,10 @@ export interface SessionRow {
   parentId: string | null;
   isSubagent: boolean;
   sourcePath: string;
+  /** Set when this session was started from a ContextDeck handoff: the handoff id. */
+  handoffId: string | null;
+  /** The session this one continued (via a handoff), if any. */
+  handoffFrom: string | null;
 }
 
 /** A session's context size over time, downsampled for display. */

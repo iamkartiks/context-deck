@@ -22,6 +22,14 @@ The UI is served by a small HTTP server that only listens on `127.0.0.1`. Becaus
 
 **Open in Terminal** (macOS only) runs the session's own resume command (`claude --resume <id>` or `codex resume <id>`) in a new Terminal window. The command is built by ContextDeck from the indexed session, with every argument shell-quoted; nothing from the request other than the session id is used. It needs the token like every other write.
 
+**Handoffs** start a new agent session with a brief built from an existing one:
+
+- The brief is built from indexed text, which was already redacted, and the person sees and can edit all of it before anything starts.
+- Starting a handoff to a different tool sends the brief to that tool's provider. The UI says which company before you start.
+- Briefs are saved to `~/.contextdeck/handoffs/` with owner-only permissions (directory 0700, files 0600). The file name is a generated id checked against `hf_` plus 10 hex digits, so a request can't choose where a file is written.
+- The start command reads the brief with `$(cat '<file>')` inside double quotes, so the brief's contents are passed as one argument and never run as shell code. A test checks this with a brief full of `$(…)`, backticks and quotes.
+- Like every other write, `POST /api/handoff` needs the per-run token and a matching Origin. The target must be a known tool.
+
 `board.json` (your canvas arrangement) contains only session ids and coordinates.
 
 ## Reporting a vulnerability

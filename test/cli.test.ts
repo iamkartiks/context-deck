@@ -62,6 +62,20 @@ describe('cli', () => {
     assert.equal(run('doctor').code, 0);
   });
 
+  it('hands a session off: prints a brief, or saves it with a start command', () => {
+    const printed = run('handoff', 'cc:0f3a1b11', '--print');
+    assert.equal(printed.code, 0, printed.err);
+    assert.match(printed.out, /^# Continue: Move auth/);
+    assert.match(printed.out, /ContextDeck handoff hf_[0-9a-f]{10} from claude-code:/);
+
+    const saved = JSON.parse(run('handoff', 'cc:0f3a1b11', '--json').out);
+    assert.match(saved.command, /^codex "\$\(cat '?.*\.md'?\)"$/, 'defaults to the other tool');
+    assert.equal(JSON.parse(run('handoff', 'cx:d5e6f701', '--json').out).command.startsWith('claude '), true);
+    assert.equal(JSON.parse(run('handoff', 'cc:0f3a1b11', '--to', 'cc', '--json').out).command.startsWith('claude '), true);
+    assert.equal(run('handoff', 'cc:0f3a1b11', '--to', 'gemini').code, 2);
+    assert.equal(run('handoff').code, 2);
+  });
+
   it('uses exit code 2 for usage errors and 1 for failures', () => {
     assert.equal(run('nonsense').code, 2);
     assert.equal(run('search').code, 2);
