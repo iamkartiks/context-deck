@@ -44,7 +44,11 @@ Still to do here:
 
 ## Phase 5: context handoff
 
-- [ ] "Continue in another tool": build a compact brief from a session (goal, decisions, files changed, open todos) and start a new session in a different agent with it
+- [x] "Continue in another tool": a brief built from the session (goal, instructions, where it got to, files, commands), editable before launch, starts a new session in the other tool and is linked back to the original (v0.4)
+- [x] "Fresh session" in the same tool when a window is nearly full (v0.4)
+- [ ] Optional AI-written brief: ask the source tool to summarise its own session (`claude -p` / `codex exec`), for long sessions where decisions are buried mid-conversation
+- [ ] Hand off to more tools as their adapters arrive (Gemini CLI, OpenCode, Aider)
+- [ ] Handoff from a range of messages, not just the whole session
 - [ ] Hooks for live status ("waiting for you", "done") from tools that support them
 
 ## Non-goals

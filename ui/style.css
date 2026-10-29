@@ -509,6 +509,12 @@ main {
   stroke-linecap: round;
 }
 
+.threads path.handoff {
+  stroke-dasharray: 6 5;
+  stroke-opacity: 0.7;
+  stroke-width: 1.4;
+}
+
 .threads path.on {
   stroke-opacity: 1;
   stroke-width: 1.8;
@@ -818,6 +824,10 @@ main {
   fill: none;
   stroke: var(--ink);
   stroke-width: 1.2;
+}
+
+.legend-thread.dashed {
+  stroke-dasharray: 3.5 3;
 }
 
 .legend-glow {
@@ -1382,6 +1392,174 @@ main {
 
 .convo.hide-tools .msg.tool {
   display: none;
+}
+
+/* ── Handoff ───────────────────────────────────────────────────────────── */
+
+.handoff-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.handoff-actions .pill .swatch {
+  border-color: currentColor;
+}
+
+.scrim {
+  position: absolute;
+  z-index: 20;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(22, 22, 22, 0.32);
+}
+
+.composer {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(780px, 100%);
+  max-height: 100%;
+  padding: 22px 24px 20px;
+  overflow: hidden;
+  background: var(--panel);
+  border: 1px solid var(--ink);
+  border-radius: 18px;
+  box-shadow: 0 24px 60px rgba(22, 22, 22, 0.25);
+}
+
+.composer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.composer h2 {
+  margin: 6px 0 0;
+  font-size: 23px;
+  line-height: 1.25;
+  font-weight: 500;
+  letter-spacing: -0.015em;
+}
+
+.composer-lede {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.composer-lede code {
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.composer .note,
+.composer .warn {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.composer .warn {
+  padding: 8px 12px;
+  border: 1px solid var(--ink);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+  color: var(--ink);
+}
+
+.brief {
+  flex: 1;
+  min-height: 220px;
+  height: 46vh;
+  width: 100%;
+  padding: 14px 16px;
+  resize: vertical;
+  border: 1px solid var(--line-3);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  outline: none;
+  tab-size: 2;
+}
+
+.brief:focus {
+  border-color: var(--ink);
+}
+
+.composer-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.brief-meta {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.composer-cmd {
+  display: block;
+  padding: 10px 12px;
+  border: 1px solid var(--line-3);
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: 12px;
+  word-break: break-all;
+  user-select: all;
+}
+
+.composer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.text-button {
+  margin-left: auto;
+  height: 36px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  font-size: 11.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.text-button:hover {
+  color: var(--ink);
+}
+
+@media (max-width: 720px) {
+  .scrim {
+    padding: 0;
+    align-items: stretch;
+  }
+  .composer {
+    border-radius: 0;
+    border: 0;
+    padding: 18px 16px;
+  }
+  .brief {
+    height: auto;
+  }
+  .text-button {
+    margin-left: 0;
+  }
 }
 
 /* ── Toast ─────────────────────────────────────────────────────────────── */

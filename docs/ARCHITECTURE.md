@@ -61,11 +61,25 @@ The index is a cache. Its schema is versioned in `meta.schema_version`; when it 
 A workstream is work that spans sessions, often across tools. Sessions are joined (union-find) when:
 
 - they edited the same file (resolved to an absolute path against each session's cwd), ignoring files so common they'd join everything (`package.json`, lockfiles, `README.md`…, or any file touched by more than 8 sessions), or
-- they ran in the same folder on the same feature branch (`main`, `master`, `develop` and similar don't count).
+- they ran in the same folder on the same feature branch (`main`, `master`, `develop` and similar don't count), or
+- one continued the other through a handoff (see below).
 
-Linked groups are named after their feature branch, or else after the files that tie them together. Sessions that link to nothing are gathered per project as "loose" groups. The shared-file pairs are returned as `edges`, which the canvas draws as threads.
+Linked groups are named after their feature branch, or else after the files that tie them together. Sessions that link to nothing are gathered per project as "loose" groups. The links are returned as `edges` (`kind: 'files'` or `'handoff'`), which the canvas draws as threads, dashed for handoffs.
 
-## 5. Consumers
+## 5. Handoff (`src/handoff.ts`, `src/handoff-marker.ts`)
+
+Continuing a session's work in a new session, in the same or another tool.
+
+1. **`buildBrief()`** reads the session from the index and writes a markdown brief: title, marker line, where things are (folder, branch, previous tool and model, context use), the goal (first prompt), later instructions (other user prompts, newest 12, slash commands skipped), the last two replies, files changed (relative to the project), recent tool calls (pure reads and searches left out), and how to pick up. It shrinks in steps to stay under 24,000 characters. If the session was itself started from a handoff, the original goal is pulled out of its brief instead of nesting briefs.
+2. **The marker**: `(ContextDeck handoff hf_<10 hex> from <provider>:<session id>)`. `finalizeBrief()` puts it back if the person deleted or changed it while editing.
+3. **`saveBrief()`** writes `~/.contextdeck/handoffs/<id>.md` (directory 0700, file 0600).
+4. **`startLine()`** builds `cd <project> && <tool> "$(cat <brief file>)"` from the adapter's `startCommand()`. Both paths are shell-quoted, and the brief is read with `$(cat …)` inside double quotes, so its contents reach the tool as one argument and are never interpreted by the shell (there's a test for exactly that, with `$(…)` and backticks in the brief). If the project folder no longer exists, the `cd` is left out.
+5. **Linking**: when any session is saved, `Store.saveSession()` looks for a marker in its first user message and stores `handoff_id` and `handoff_from` (schema v3). `related()` reports `continued-from` / `continued-in` first, and `workstreams()` joins the two sessions.
+
+An adapter becomes a handoff target by implementing `startCommand()` (and optionally `defaultContextWindow`). Claude Code and Codex both take an initial prompt as a positional argument (`claude "…"`, `codex "…"`).
+
+## 6. Consumers
+
 
 The CLI (`src/cli.ts`) is a thin layer over the store. Every command supports `--json`; changing its shape is a breaking change.
 
@@ -82,6 +96,8 @@ The CLI (`src/cli.ts`) is a thin layer over the store. Every command supports `-
 | `GET` / `PUT /api/layout` | Hand-placed card positions, stored in `board.json` (not in the index, so rebuilding the index never loses them) |
 | `POST /api/reindex` | Rescan now |
 | `POST /api/open-terminal` | macOS: run a session's resume command in Terminal |
+| `GET /api/handoff/preview?id=&to=&checkIn=` | Build a brief for a handoff, with its size and the target's window |
+| `POST /api/handoff` | Save a (possibly edited) brief and return the start command; with `launch: true`, open it in Terminal (macOS) |
 
 Writes need the per-run token embedded in the page; see [SECURITY.md](../SECURITY.md) for the full model.
 

@@ -283,6 +283,10 @@ export const codexAdapter: Adapter = {
 
   parse,
 
+  // `codex "prompt"` starts the interactive TUI with an initial prompt.
+  startCommand: () => ({ command: 'codex', args: [] }),
+  defaultContextWindow: 272_000,
+
   resumeCommand(session: SessionRow): ResumeCommand {
     const args = ['resume', session.nativeId];
     const cwd = session.cwd;

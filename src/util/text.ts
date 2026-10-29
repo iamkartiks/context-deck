@@ -22,7 +22,8 @@ export function titleFrom(text: string): string {
       .split('\n')
       .map((l) => l.trim())
       .find((l) => l.length > 0) ?? '';
-  return truncate(redact(line).replace(/\s+/g, ' '), MAX_TITLE_CHARS);
+  // Strip a leading markdown heading marker ("# Continue: …" → "Continue: …")
+  return truncate(redact(line.replace(/^#{1,6}\s+/, '')).replace(/\s+/g, ' '), MAX_TITLE_CHARS);
 }
 
 /** Pull text out of the common "content" shapes: a string, or an array of blocks. */

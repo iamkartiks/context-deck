@@ -83,12 +83,18 @@
           <span class="legend-glow" aria-hidden="true"></span>
           <span>A glow means the group was active in the last hour.</span>
         </div>
+        <div class="legend-row">
+          <svg class="legend-thread dashed" width="24" height="14" viewBox="0 0 24 14" aria-hidden="true"><path d="M1 12 C 9 12, 15 2, 23 2"></path></svg>
+          <span>Dashed threads show work handed to a new session.</span>
+        </div>
       </div>
     </section>
 
     <section id="list" class="list" hidden aria-label="Sessions"></section>
 
     <aside id="reader" class="reader" hidden aria-labelledby="reader-title" tabindex="-1"></aside>
+
+    <div id="composer" class="scrim" hidden></div>
   </main>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>

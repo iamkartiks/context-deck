@@ -9,6 +9,10 @@ import { loadBoard, sanitizeBoard, saveBoard } from './board.js';
 import type { Config } from './config.js';
 import { indexSources, watchSources, type IndexSummary, type Watcher } from './indexer.js';
 import type { Store } from './store.js';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { buildBrief, finalizeBrief, handoffTargets, saveBrief, startLine } from './handoff.js';
+import { HANDOFF_ID_RE } from './handoff-marker.js';
 
 /**
  * The local web UI server.
@@ -170,7 +174,10 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       })),
       lastIndex,
       sources: cfg.sources.map((s) => ({ provider: s.adapter.id, label: s.adapter.label, root: s.root })),
-      capabilities: { openTerminal: canOpenTerminal },
+      capabilities: {
+        openTerminal: canOpenTerminal,
+        handoffTargets: handoffTargets().map((a) => ({ id: a.id, label: a.label })),
+      },
     };
   };
 
@@ -260,6 +267,70 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       version++;
       broadcast('index', { version, summary: sum });
       return send(res, 200, sum);
+    }
+
+    if (method === 'GET' && path === '/api/handoff/preview') {
+      const ref = url.searchParams.get('id') ?? '';
+      const to = url.searchParams.get('to') ?? '';
+      const target = getAdapter(to);
+      if (!target?.startCommand) throw new HttpError(400, `Can't hand off to "${to}".`);
+      let brief;
+      try {
+        brief = buildBrief(store, ref, {
+          to,
+          checkIn: url.searchParams.get('checkIn') !== '0',
+          handoffId: url.searchParams.get('handoffId') ?? undefined,
+        });
+      } catch (err) {
+        throw new HttpError(404, (err as Error).message);
+      }
+      const cwd = brief.from.cwd;
+      return send(res, 200, {
+        handoffId: brief.handoffId,
+        brief: brief.text,
+        tokens: brief.tokens,
+        from: brief.from,
+        to: brief.to,
+        toLabel: brief.toLabel,
+        fromLabel: getAdapter(brief.from.provider)?.label ?? brief.from.provider,
+        targetWindow: brief.targetWindow,
+        cwd,
+        cwdExists: !!cwd && existsSync(cwd),
+        crossProvider: brief.from.provider !== to,
+        briefPath: join(cfg.home, 'handoffs', `${brief.handoffId}.md`),
+        canOpenTerminal,
+      });
+    }
+
+    if (method === 'POST' && path === '/api/handoff') {
+      const body = (await readBody(req)) as { id?: unknown; to?: unknown; brief?: unknown; handoffId?: unknown; launch?: unknown } | null;
+      if (!body || typeof body.id !== 'string' || typeof body.to !== 'string' || typeof body.brief !== 'string' || typeof body.handoffId !== 'string') {
+        throw new HttpError(400, 'Expected {"id", "to", "handoffId", "brief"}.');
+      }
+      if (!HANDOFF_ID_RE.test(body.handoffId)) throw new HttpError(400, 'Invalid handoff id.');
+      const target = getAdapter(body.to);
+      if (!target?.startCommand) throw new HttpError(400, `Can't hand off to "${body.to}".`);
+      let from;
+      try {
+        from = store.resolve(body.id);
+      } catch (err) {
+        throw new HttpError(404, (err as Error).message);
+      }
+      let text;
+      try {
+        text = finalizeBrief(body.brief, body.handoffId, from.id);
+      } catch (err) {
+        throw new HttpError(400, (err as Error).message);
+      }
+      const briefPath = saveBrief(cfg.home, body.handoffId, text);
+      const line = startLine(target, from.cwd, briefPath);
+      let launched = false;
+      if (body.launch === true) {
+        if (!canOpenTerminal) throw new HttpError(501, 'Opening a terminal is only supported on macOS. Copy the command instead.');
+        await launchTerminal(line);
+        launched = true;
+      }
+      return send(res, 200, { handoffId: body.handoffId, path: briefPath, command: line, launched });
     }
 
     if (method === 'POST' && path === '/api/open-terminal') {

@@ -199,7 +199,74 @@ describe('ui server', () => {
     assert.equal(bad, 400);
   });
 
+  it('lists the tools a session can be handed to', async () => {
+    const caps = (await call(server.port, '/api/board')).json().capabilities;
+    assert.deepEqual(
+      caps.handoffTargets.map((t: { id: string }) => t.id),
+      ['claude-code', 'codex'],
+    );
+  });
+
+  it('previews a handoff brief', async () => {
+    const r = await call(server.port, '/api/handoff/preview?id=cc%3A0f3a1b11&to=codex');
+    assert.equal(r.status, 200, r.body);
+    const d = r.json();
+    assert.match(d.handoffId, /^hf_[0-9a-f]{10}$/);
+    assert.match(d.brief, /^# Continue: /);
+    assert.ok(d.brief.includes(d.handoffId));
+    assert.equal(d.toLabel, 'Codex CLI');
+    assert.equal(d.fromLabel, 'Claude Code');
+    assert.equal(d.crossProvider, true);
+    assert.equal(d.targetWindow, 272_000);
+    assert.equal(d.cwdExists, false, 'the fixture folder is not on this machine');
+    assert.ok(d.tokens > 100);
+    const off = (await call(server.port, `/api/handoff/preview?id=cc%3A0f3a1b11&to=codex&checkIn=0&handoffId=${d.handoffId}`)).json();
+    assert.equal(off.handoffId, d.handoffId, 'same id when rebuilding');
+    assert.match(off.brief, /carry on with the next step/);
+    assert.equal((await call(server.port, '/api/handoff/preview?id=cc%3A0f3a1b11&to=gemini')).status, 400);
+    assert.equal((await call(server.port, '/api/handoff/preview?id=nope&to=codex')).status, 404);
+  });
+
+  it('saves an edited brief and returns the start command', async () => {
+    const body = { id: 'cc:0f3a1b11', to: 'codex', handoffId: 'hf_00000000aa', brief: '# Continue: edited by me\nDo the thing.' };
+    assert.equal((await call(server.port, '/api/handoff', { method: 'POST', body })).status, 403, 'needs the token');
+    const r = await call(server.port, '/api/handoff', { method: 'POST', headers: auth(), body });
+    assert.equal(r.status, 200, r.body);
+    const d = r.json();
+    assert.equal(d.launched, false);
+    assert.equal(d.path, join(s.home, 'handoffs', 'hf_00000000aa.md'));
+    const saved = readFileSync(d.path, 'utf8');
+    assert.match(saved, /^# Continue: edited by me\n/);
+    assert.match(saved, /ContextDeck handoff hf_00000000aa from claude-code:7c1e2a90/, 'marker added back');
+    // The path is quoted when it needs to be (spaces, Windows backslashes)
+    assert.ok(d.command === `codex "$(cat ${d.path})"` || d.command === `codex "$(cat '${d.path}')"`, d.command);
+  });
+
+  it('opens Terminal with the handoff command on macOS', async () => {
+    launched.length = 0;
+    const r = await call(server.port, '/api/handoff', {
+      method: 'POST',
+      headers: auth(),
+      body: { id: 'cc:0f3a1b11', to: 'codex', handoffId: 'hf_00000000bb', brief: 'brief', launch: true },
+    });
+    assert.equal(r.status, 200, r.body);
+    assert.equal(r.json().launched, true);
+    assert.equal(launched.length, 1);
+    assert.match(launched[0]!, /^codex "\$\(cat '?.*hf_00000000bb\.md'?\)"$/);
+    launched.length = 0;
+  });
+
+  it('rejects bad handoff requests', async () => {
+    const post = (body: unknown) => call(server.port, '/api/handoff', { method: 'POST', headers: auth(), body });
+    assert.equal((await post({ id: 'cc:0f3a1b11', to: 'codex', handoffId: '../../x', brief: 'b' })).status, 400);
+    assert.equal((await post({ id: 'cc:0f3a1b11', to: 'gemini', handoffId: 'hf_00000000cc', brief: 'b' })).status, 400);
+    assert.equal((await post({ id: 'cc:0f3a1b11', to: 'codex', handoffId: 'hf_00000000cc', brief: '  ' })).status, 400);
+    assert.equal((await post({ id: 'nope', to: 'codex', handoffId: 'hf_00000000cc', brief: 'b' })).status, 404);
+    assert.equal((await post({ to: 'codex' })).status, 400);
+  });
+
   it('opens Terminal with the exact resume command (macOS)', async () => {
+    launched.length = 0;
     const r = await call(server.port, '/api/open-terminal', { method: 'POST', headers: auth(), body: { id: 'cx:d5e6f701' } });
     assert.equal(r.status, 200);
     assert.deepEqual(launched, ['cd /Users/alice/code/acme-shop && codex resume 019a2f3c-5d6e-7f80-91a2-b3c4d5e6f701']);
@@ -246,6 +313,12 @@ describe('ui server on other platforms', () => {
       });
       assert.equal(r.status, 501);
       assert.equal((await call(server.port, '/api/board')).json().capabilities.openTerminal, false);
+      const h = await call(server.port, '/api/handoff', {
+        method: 'POST',
+        headers: { 'X-ContextDeck-Token': server.token },
+        body: { id: 'cc:0f3a1b11', to: 'codex', handoffId: 'hf_00000000dd', brief: 'b', launch: true },
+      });
+      assert.equal(h.status, 501);
     } finally {
       await server.close();
       store.close();
