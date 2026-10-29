@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { qwenCodeAdapter } from '../src/adapters/qwen-code.js';
 import type { SessionRow } from '../src/schema.js';
@@ -12,7 +13,7 @@ describe('Qwen Code adapter', () => {
   });
 
   it('looks where Qwen Code writes', () => {
-    assert.equal(qwenCodeAdapter.defaultRoot({}, '/home/a'), '/home/a/.qwen');
+    assert.equal(qwenCodeAdapter.defaultRoot({}, '/home/a'), join('/home/a', '.qwen'));
     assert.equal(qwenCodeAdapter.defaultRoot({ QWEN_HOME: '/q' }, '/home/a'), '/q');
     assert.equal(qwenCodeAdapter.defaultRoot({ QWEN_HOME: '/q', QWEN_RUNTIME_DIR: '/rt' }, '/home/a'), '/rt', 'sessions follow the runtime folder');
     assert.equal(qwenCodeAdapter.defaultRoot({ QWEN_HOME: '/q', CONTEXTDECK_QWEN_DIR: '/mine' }, '/home/a'), '/mine');
