@@ -48,6 +48,12 @@ describe('Claude Code adapter', () => {
     assert.equal(s.compactions, 1);
   });
 
+  it('records context size per turn and where compactions happened', async () => {
+    const { session: s } = await claudeCodeAdapter.parse(CC_MAIN);
+    assert.deepEqual(s!.contextSeries, [16_500, 19_500, 44_000]);
+    assert.deepEqual(s!.compactionPoints, [2], 'the compaction came before the third turn');
+  });
+
   it('records edited files and tool calls', async () => {
     const { session: s } = await claudeCodeAdapter.parse(CC_MAIN);
     assert.ok(s);

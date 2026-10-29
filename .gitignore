@@ -13,3 +13,5 @@ coverage/
 *.log
 .env
 .env.*
+.demo-data/
+.demo-ui/

@@ -15,19 +15,29 @@ Claude Code + Codex adapters, unified schema, SQLite + full-text search, increme
 - [ ] `contextdeck export <id> --md` (redacted Markdown, for sharing or pasting into another agent)
 - [ ] Configurable extra redaction patterns
 
-## Phase 3: the canvas UI
+## Phase 3: the canvas UI ✅ (v0.2)
 
-A local web app (`contextdeck ui`) served on `127.0.0.1`, built on the `--json` API.
+A local web app (`contextdeck ui`) served on `127.0.0.1`.
 
-- [ ] Timeline and list views with live updates from watch mode
-- [ ] Session reader with tool calls collapsed
-- [ ] **Canvas**: each session is a card; cards from any tool cluster by what they were about, not where they came from. Drag to regroup.
-- [ ] Context-health badges: how full each window is, how often it compacted
-- [ ] One-click resume (opens the right terminal in the right folder)
+- [x] Canvas: every session is a card, dragged anywhere and remembered; grouped by workstream, project, tool or day
+- [x] Context health on every card: the card fills up as its window fills, with a line per compaction
+- [x] List view, live updates from watch mode, search that lights up matching cards
+- [x] Session reader: files changed, related sessions across tools, subagents, conversation with tool calls collapsed
+- [x] Resume: copy the command, or open it in Terminal (macOS)
+
+Still to do here:
+
+- [ ] Pinch-to-zoom on touch screens (zoom buttons work today)
+- [ ] Open in other terminals: iTerm2, Ghostty, Warp, Windows Terminal, GNOME Terminal
+- [ ] Your own named groups: drag cards into a group you made, alongside the automatic ones
+- [ ] Notes and pins on cards
+- [ ] Keyboard navigation between cards (arrow keys)
+- [ ] A Timeline grouping that lays days out left to right
 
 ## Phase 4: organisation that thinks
 
-- [ ] **Workstreams**: link sessions across tools by shared files, branch and time (the `related` command is the seed)
+- [x] **Workstreams**: sessions linked across tools by shared files and feature branch (v0.2)
+- [ ] Use time too: sessions within an hour of each other in the same folder probably belong together
 - [ ] Local embeddings (e.g. `sqlite-vec`) for "find sessions like this one" and automatic clustering
 - [ ] Auto titles and tags from a small local model, opt-in
 - [ ] Duplicate and stale detection: "you've asked about this migration in 4 sessions across 2 tools"

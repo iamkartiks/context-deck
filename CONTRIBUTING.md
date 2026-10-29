@@ -11,6 +11,7 @@ git clone <your-fork-url> contextdeck && cd contextdeck
 npm install
 npm test          # builds, then runs the whole suite
 npm run demo      # indexes the sample sessions in fixtures/ into ./.demo
+npm run demo:ui   # ~20 realistic sample sessions on the canvas, at http://127.0.0.1:4977
 ```
 
 There are no native dependencies, so if `npm install` works, everything works.
@@ -35,11 +36,18 @@ src/
   store.ts             SQLite index: sessions, messages, FTS, files touched
   indexer.ts           incremental scan + watch mode
   cli.ts, format.ts    the command line
+  server.ts, board.ts  the local UI server and saved canvas layout
   util/                streaming JSONL reader, redaction, text helpers
+ui/                    the canvas: index.html, style.css, app.js, bundled font (no build step)
+scripts/demo-data.mjs  generates realistic sample sessions for UI work
 test/                  *.test.ts, one per module
 fixtures/              synthetic session files that mirror each tool's real layout
-docs/                  architecture, adapter guide, roadmap
+docs/                  architecture, adapter guide, roadmap, README images
 ```
+
+### Working on the canvas
+
+Run `npm run demo:ui` and edit files in `ui/`. The server reads them on every request, so a browser reload shows your change; no rebuild or restart needed (changes in `src/` need `npm run build` and a restart). Keep it dependency-free, check it in light and dark mode and at phone width, and never put session text into `innerHTML`; use the `h()` helper, which creates text nodes.
 
 ## What makes a good PR
 

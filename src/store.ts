@@ -2,7 +2,7 @@ import { mkdirSync, statSync } from 'node:fs';
 import { basename, dirname, posix, win32 } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { adapterByPrefix, getAdapter } from './adapters/index.js';
-import type { NormalizedSession, ProviderId, SessionRow } from './schema.js';
+import type { ContextSeries, NormalizedSession, ProviderId, SessionRow } from './schema.js';
 
 /**
  * The local index: one SQLite file (default ~/.contextdeck/index.db).
@@ -11,7 +11,27 @@ import type { NormalizedSession, ProviderId, SessionRow } from './schema.js';
  * from the providers' own session files, which are never modified.
  */
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
+
+/** Longest context series kept per session; longer ones are downsampled. */
+const MAX_SERIES_POINTS = 120;
+
+/**
+ * Downsample a context series to at most `max` points, keeping each bucket's
+ * last value (the context size at the end of that stretch) and moving
+ * compaction markers to the bucket they fall in.
+ */
+export function downsampleSeries(points: number[], compactions: number[], max = MAX_SERIES_POINTS): ContextSeries {
+  const clamp = (i: number, n: number) => Math.max(0, Math.min(n, i));
+  if (points.length <= max) {
+    return { points: [...points], compactions: compactions.map((c) => clamp(c, points.length)) };
+  }
+  const step = points.length / max;
+  const out: number[] = [];
+  for (let i = 0; i < max; i++) out.push(points[Math.min(points.length - 1, Math.floor((i + 1) * step) - 1)]!);
+  const marks = compactions.map((c) => clamp(Math.floor(c / step), max));
+  return { points: out, compactions: [...new Set(marks)] };
+}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -49,6 +69,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   context_tokens  INTEGER,
   context_window  INTEGER,
   compactions     INTEGER NOT NULL,
+  context_series  TEXT,
   parent_id       TEXT,
   is_subagent     INTEGER NOT NULL,
   source_path     TEXT NOT NULL
@@ -213,7 +234,15 @@ export class Store {
         `Index at ${this.path} was created by a newer contextdeck (schema ${current}). Upgrade, or delete the file to rebuild.`,
       );
     }
-    // Future migrations go here: if (current < 2) { … }
+    if (current > 0 && current < 2) {
+      // v2 adds the context-over-time series. The index is a cache, so the
+      // simplest correct upgrade is to add the column and re-read every file.
+      const cols = this.db.prepare(`PRAGMA table_info(sessions)`).all() as Row[];
+      if (!cols.some((c) => c.name === 'context_series')) {
+        this.db.exec(`ALTER TABLE sessions ADD COLUMN context_series TEXT`);
+      }
+      this.db.exec(`DELETE FROM messages_fts; DELETE FROM messages; DELETE FROM session_files; DELETE FROM sessions; DELETE FROM files;`);
+    }
     this.db
       .prepare(`INSERT INTO meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
       .run(String(SCHEMA_VERSION));
@@ -321,8 +350,8 @@ export class Store {
         .prepare(
           `INSERT INTO sessions(id, provider, native_id, short_id, title, cwd, project, git_branch, model, cli_version,
              started_at, updated_at, message_count, user_turns, assistant_turns, tool_calls, tokens_in, tokens_out,
-             context_tokens, context_window, compactions, parent_id, is_subagent, source_path)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             context_tokens, context_window, compactions, context_series, parent_id, is_subagent, source_path)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET provider = excluded.provider, native_id = excluded.native_id,
              short_id = excluded.short_id, title = excluded.title, cwd = excluded.cwd, project = excluded.project,
              git_branch = excluded.git_branch, model = excluded.model, cli_version = excluded.cli_version,
@@ -331,7 +360,7 @@ export class Store {
              assistant_turns = excluded.assistant_turns, tool_calls = excluded.tool_calls,
              tokens_in = excluded.tokens_in, tokens_out = excluded.tokens_out,
              context_tokens = excluded.context_tokens, context_window = excluded.context_window,
-             compactions = excluded.compactions, parent_id = excluded.parent_id,
+             compactions = excluded.compactions, context_series = excluded.context_series, parent_id = excluded.parent_id,
              is_subagent = excluded.is_subagent, source_path = excluded.source_path`,
         )
         .run(
@@ -356,6 +385,7 @@ export class Store {
           s.contextTokens,
           s.contextWindow,
           s.compactions,
+          s.contextSeries.length ? JSON.stringify(downsampleSeries(s.contextSeries, s.compactionPoints)) : null,
           parentId,
           s.isSubagent ? 1 : 0,
           path,
@@ -451,6 +481,18 @@ export class Store {
       toolName: (r.tool_name as string | null) ?? null,
       text: String(r.text),
     }));
+  }
+
+  /** Context size over the session, or null if the tool didn't record token usage. */
+  contextSeries(sessionId: string): ContextSeries | null {
+    const r = this.db.prepare(`SELECT context_series FROM sessions WHERE id = ?`).get(sessionId) as Row | undefined;
+    if (!r?.context_series) return null;
+    try {
+      const v = JSON.parse(String(r.context_series)) as ContextSeries;
+      return Array.isArray(v.points) && Array.isArray(v.compactions) ? v : null;
+    } catch {
+      return null;
+    }
   }
 
   filesTouched(sessionId: string): string[] {
@@ -616,4 +658,233 @@ export class Store {
       this.db.prepare(`SELECT path, error FROM files WHERE error IS NOT NULL ORDER BY indexed_at DESC LIMIT ?`).all(limit) as Row[]
     ).map((r) => ({ path: String(r.path), error: String(r.error) }));
   }
+
+  /** Subagent sessions of one parent, newest first. */
+  subagents(parentId: string): SessionRow[] {
+    return (
+      this.db.prepare(`SELECT * FROM sessions WHERE parent_id = ? ORDER BY updated_at DESC`).all(parentId) as Row[]
+    ).map(toSessionRow);
+  }
+
+  /** Number of subagent sessions per parent id. */
+  subagentCounts(): Record<string, number> {
+    const out: Record<string, number> = {};
+    const rows = this.db
+      .prepare(`SELECT parent_id, COUNT(*) AS n FROM sessions WHERE is_subagent = 1 AND parent_id IS NOT NULL GROUP BY parent_id`)
+      .all() as Row[];
+    for (const r of rows) out[String(r.parent_id)] = Number(r.n);
+    return out;
+  }
+
+  /**
+   * Group top-level sessions into workstreams: pieces of work that span sessions
+   * and tools. Two sessions belong together when they edited the same file, or
+   * ran in the same folder on the same feature branch. Sessions that link to
+   * nothing are gathered per project as "loose" groups.
+   */
+  workstreams(): WorkstreamGraph {
+    const sessions = (this.db.prepare(`SELECT * FROM sessions WHERE is_subagent = 0`).all() as Row[]).map(toSessionRow);
+    const byId = new Map(sessions.map((s) => [s.id, s]));
+
+    // Union-find over session ids
+    const parent = new Map<string, string>(sessions.map((s) => [s.id, s.id]));
+    const find = (x: string): string => {
+      let r = x;
+      while (parent.get(r) !== r) r = parent.get(r)!;
+      while (parent.get(x) !== r) {
+        const next = parent.get(x)!;
+        parent.set(x, r);
+        x = next;
+      }
+      return r;
+    };
+    const union = (a: string, b: string) => {
+      const ra = find(a);
+      const rb = find(b);
+      if (ra !== rb) parent.set(ra, rb);
+    };
+
+    // 1. Shared files. Files touched by many sessions (lockfiles, package.json…) link everything, so skip them.
+    const fileRows = this.db
+      .prepare(
+        `SELECT sf.abs_path, sf.path, sf.session_id FROM session_files sf
+         JOIN sessions s ON s.id = sf.session_id WHERE s.is_subagent = 0`,
+      )
+      .all() as Row[];
+    const sessionsByFile = new Map<string, { path: string; ids: Set<string> }>();
+    for (const r of fileRows) {
+      const abs = String(r.abs_path);
+      const entry = sessionsByFile.get(abs) ?? { path: String(r.path), ids: new Set<string>() };
+      entry.ids.add(String(r.session_id));
+      sessionsByFile.set(abs, entry);
+    }
+    const pairFiles = new Map<string, Set<string>>();
+    for (const [abs, { ids }] of sessionsByFile) {
+      if (ids.size < 2 || ids.size > MAX_SESSIONS_PER_SHARED_FILE) continue;
+      if (UBIQUITOUS_FILES.has(basename(abs.replace(/\\/g, '/')))) continue;
+      const list = [...ids].sort();
+      for (let i = 0; i < list.length; i++) {
+        for (let j = i + 1; j < list.length; j++) {
+          union(list[i]!, list[j]!);
+          const key = `${list[i]}\n${list[j]}`;
+          const set = pairFiles.get(key) ?? new Set<string>();
+          set.add(abs);
+          pairFiles.set(key, set);
+        }
+      }
+    }
+
+    // 2. Same folder + same feature branch
+    const byBranch = new Map<string, string[]>();
+    for (const s of sessions) {
+      if (!s.cwd || !s.gitBranch || TRUNK_BRANCHES.has(s.gitBranch)) continue;
+      const key = `${s.cwd}\n${s.gitBranch}`;
+      byBranch.set(key, [...(byBranch.get(key) ?? []), s.id]);
+    }
+    for (const ids of byBranch.values()) for (let i = 1; i < ids.length; i++) union(ids[0]!, ids[i]!);
+
+    // Collect components
+    const components = new Map<string, SessionRow[]>();
+    for (const s of sessions) {
+      const root = find(s.id);
+      components.set(root, [...(components.get(root) ?? []), s]);
+    }
+
+    const workstreams: Workstream[] = [];
+    const loose = new Map<string, SessionRow[]>();
+    for (const members of components.values()) {
+      if (members.length === 1) {
+        const s = members[0]!;
+        const key = s.cwd ?? '';
+        loose.set(key, [...(loose.get(key) ?? []), s]);
+        continue;
+      }
+      members.sort((a, b) => (a.startedAt ?? '').localeCompare(b.startedAt ?? ''));
+      const first = members[0]!;
+      const branches = new Set(members.map((m) => m.gitBranch));
+      const branch = branches.size === 1 ? first.gitBranch : null;
+      let label: string;
+      if (branch && !TRUNK_BRANCHES.has(branch)) {
+        label = humanizeBranch(branch);
+      } else {
+        // Name it after the files that tie it together, most shared first
+        const ids = new Set(members.map((m) => m.id));
+        const counts = new Map<string, number>();
+        for (const [key, files] of pairFiles) {
+          const [a, b] = key.split('\n') as [string, string];
+          if (!ids.has(a) || !ids.has(b)) continue;
+          for (const f of files) counts.set(f, (counts.get(f) ?? 0) + 1);
+        }
+        const names = [...counts.entries()]
+          .sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]))
+          .map(([abs]) => basename(abs.replace(/\\/g, '/')));
+        const unique = [...new Set(names)].slice(0, 2);
+        label = unique.length ? unique.join(' and ') : first.title;
+      }
+      workstreams.push({
+        id: `ws:${first.id}`,
+        kind: 'linked',
+        label,
+        project: first.project,
+        cwd: first.cwd,
+        branch,
+        providers: [...new Set(members.map((m) => m.provider))].sort(),
+        sessionIds: members.map((m) => m.id),
+        updatedAt: maxIso(members.map((m) => m.updatedAt)),
+      });
+    }
+    for (const [cwd, members] of loose) {
+      members.sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
+      const project = members[0]!.project;
+      workstreams.push({
+        id: `loose:${cwd}`,
+        kind: 'loose',
+        label: project ?? 'No project',
+        project,
+        cwd: cwd || null,
+        branch: null,
+        providers: [...new Set(members.map((m) => m.provider))].sort(),
+        sessionIds: members.map((m) => m.id),
+        updatedAt: maxIso(members.map((m) => m.updatedAt)),
+      });
+    }
+    workstreams.sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
+
+    const edges: WorkstreamEdge[] = [];
+    for (const [key, files] of pairFiles) {
+      const [a, b] = key.split('\n') as [string, string];
+      if (!byId.has(a) || !byId.has(b)) continue;
+      edges.push({
+        a,
+        b,
+        files: [...files].map((abs) => sessionsByFile.get(abs)?.path ?? abs).sort(),
+      });
+    }
+
+    const sessionWorkstream: Record<string, string> = {};
+    for (const w of workstreams) for (const id of w.sessionIds) sessionWorkstream[id] = w.id;
+    return { workstreams, edges, sessionWorkstream };
+  }
+}
+
+/** A file shared by more sessions than this is too common to signal shared work. */
+const MAX_SESSIONS_PER_SHARED_FILE = 8;
+const UBIQUITOUS_FILES = new Set([
+  'package.json',
+  'package-lock.json',
+  'pnpm-lock.yaml',
+  'yarn.lock',
+  'bun.lockb',
+  'Cargo.lock',
+  'Cargo.toml',
+  'go.mod',
+  'go.sum',
+  'poetry.lock',
+  'requirements.txt',
+  'pyproject.toml',
+  'README.md',
+  'CHANGELOG.md',
+  'CLAUDE.md',
+  'AGENTS.md',
+  '.gitignore',
+  'tsconfig.json',
+  '.env.example',
+]);
+const TRUNK_BRANCHES = new Set(['main', 'master', 'develop', 'dev', 'trunk', 'HEAD']);
+
+function humanizeBranch(branch: string): string {
+  const last = branch.split('/').filter(Boolean).pop() ?? branch;
+  return last.replace(/[-_]+/g, ' ').trim() || branch;
+}
+
+function maxIso(values: (string | null)[]): string | null {
+  let best: string | null = null;
+  for (const v of values) if (v && (!best || v > best)) best = v;
+  return best;
+}
+
+export interface Workstream {
+  id: string;
+  /** "linked": sessions joined by shared files or a feature branch. "loose": unlinked sessions of one project. */
+  kind: 'linked' | 'loose';
+  label: string;
+  project: string | null;
+  cwd: string | null;
+  branch: string | null;
+  providers: string[];
+  sessionIds: string[];
+  updatedAt: string | null;
+}
+
+export interface WorkstreamEdge {
+  a: string;
+  b: string;
+  /** Files both sessions edited, as written in the sessions. */
+  files: string[];
+}
+
+export interface WorkstreamGraph {
+  workstreams: Workstream[];
+  edges: WorkstreamEdge[];
+  sessionWorkstream: Record<string, string>;
 }

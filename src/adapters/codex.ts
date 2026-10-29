@@ -197,6 +197,7 @@ async function parse(filePath: string): Promise<ParseResult> {
         break;
       case 'compacted':
         s.compactions++;
+        s.compactionPoints.push(s.contextSeries.length);
         break;
       case 'event_msg': {
         const ev = payload.type;
@@ -208,7 +209,10 @@ async function parse(filePath: string): Promise<ParseResult> {
             s.tokensIn = asNumber(total.input_tokens);
             s.tokensOut = asNumber(total.output_tokens);
           }
-          if (last) s.contextTokens = asNumber(last.input_tokens) + asNumber(last.output_tokens);
+          if (last) {
+            s.contextTokens = asNumber(last.input_tokens) + asNumber(last.output_tokens);
+            s.contextSeries.push(s.contextTokens);
+          }
           const window = asNumber(info?.model_context_window);
           if (window) s.contextWindow = window;
         } else if (ev === 'user_message') {
@@ -226,6 +230,7 @@ async function parse(filePath: string): Promise<ParseResult> {
           }
         } else if (ev === 'context_compacted') {
           s.compactions++;
+          s.compactionPoints.push(s.contextSeries.length);
         }
         break;
       }

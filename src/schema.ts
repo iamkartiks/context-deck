@@ -47,6 +47,10 @@ export interface NormalizedSession {
   contextWindow: number | null;
   /** Number of times the context was compacted / summarised. */
   compactions: number;
+  /** Context size (tokens) after each model turn, in order. Drives the "context over time" chart. */
+  contextSeries: number[];
+  /** Indexes into contextSeries where a compaction happened (before that point). */
+  compactionPoints: number[];
   /** Files the agent created, edited or deleted (as written in the session). */
   filesTouched: string[];
   /** For subagent sessions: the native id of the parent session. */
@@ -90,6 +94,14 @@ export interface SessionRow {
   sourcePath: string;
 }
 
+/** A session's context size over time, downsampled for display. */
+export interface ContextSeries {
+  /** Tokens in context after each (sampled) turn. */
+  points: number[];
+  /** Indexes into points where a compaction happened. */
+  compactions: number[];
+}
+
 export function emptySession(provider: ProviderId, nativeId: string): NormalizedSession {
   return {
     provider,
@@ -109,6 +121,8 @@ export function emptySession(provider: ProviderId, nativeId: string): Normalized
     contextTokens: null,
     contextWindow: null,
     compactions: 0,
+    contextSeries: [],
+    compactionPoints: [],
     filesTouched: [],
     parentNativeId: null,
     isSubagent: false,

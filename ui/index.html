@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="contextdeck-token" content="__CONTEXTDECK_TOKEN__">
+  <meta name="color-scheme" content="light dark">
+  <title>ContextDeck</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="bar">
+    <a class="brand" href="/" aria-label="ContextDeck home">
+      <svg width="30" height="20" viewBox="0 0 30 20" aria-hidden="true">
+        <circle cx="19" cy="10" r="8.5" class="brand-fill"></circle>
+        <circle cx="11" cy="10" r="8.5" class="brand-line"></circle>
+        <circle cx="19" cy="10" r="8.5" class="brand-line"></circle>
+      </svg>
+      <span>ContextDeck</span>
+    </a>
+
+    <label class="search">
+      <span class="visually-hidden">Search every session</span>
+      <input id="q" type="search" placeholder="Search every session" autocomplete="off" spellcheck="false">
+      <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M16 16 L20 20"></path></svg>
+    </label>
+
+    <div class="tabsets">
+      <div class="tabs" role="group" aria-labelledby="view-label">
+        <span class="tabs-label" id="view-label">View</span>
+        <button type="button" class="tab" data-view="canvas" aria-pressed="true">Canvas</button>
+        <button type="button" class="tab" data-view="list" aria-pressed="false">List</button>
+      </div>
+      <div class="tabs" role="group" aria-labelledby="group-label">
+        <span class="tabs-label" id="group-label">Group by</span>
+        <button type="button" class="tab" data-group="workstream" aria-pressed="true" title="Sessions that edited the same files or share a feature branch, in any tool">Workstream</button>
+        <button type="button" class="tab" data-group="project" aria-pressed="false">Project</button>
+        <button type="button" class="tab" data-group="tool" aria-pressed="false">Tool</button>
+        <button type="button" class="tab" data-group="day" aria-pressed="false">Day</button>
+      </div>
+    </div>
+
+    <div class="right">
+      <div class="chips" id="tool-filters" role="group" aria-label="Show sessions from"></div>
+      <span class="count" id="count" aria-live="polite"></span>
+      <button type="button" class="pill outline" id="rescan" title="Look for new and changed sessions now">
+        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M12 7 A5 5 0 1 1 10.5 3.4"></path><path d="M10.8 1.2 L10.8 3.8 L8.2 3.8"></path></svg>
+        <span>Rescan</span>
+      </button>
+    </div>
+  </header>
+
+  <main id="main">
+    <section id="canvas" class="board" aria-label="Session canvas. Drag the background to move around, drag cards to arrange them.">
+      <div id="world" class="world">
+        <div id="glows"></div>
+        <div id="zones"></div>
+        <svg id="threads" class="threads" aria-hidden="true"></svg>
+        <div id="cards"></div>
+      </div>
+      <div id="empty" class="empty" hidden></div>
+
+      <div class="dock" role="toolbar" aria-label="Canvas">
+        <button type="button" id="zoom-out" class="round" aria-label="Zoom out">−</button>
+        <button type="button" id="zoom-reset" class="zoom-level" aria-label="Show everything">100%</button>
+        <button type="button" id="zoom-in" class="round" aria-label="Zoom in">+</button>
+        <span class="dock-rule" aria-hidden="true"></span>
+        <button type="button" id="layout-toggle" class="pill solid">Tidy up</button>
+      </div>
+
+      <div class="legend">
+        <div class="legend-row">
+          <span class="legend-glass" aria-hidden="true"><i></i><b></b></span>
+          <span>Fill is how full each context window is. Each line in it is a compaction.</span>
+        </div>
+        <div class="legend-row">
+          <svg class="legend-thread" width="24" height="14" viewBox="0 0 24 14" aria-hidden="true"><path d="M1 12 C 9 12, 15 2, 23 2"></path></svg>
+          <span>Threads join sessions that edited the same files.</span>
+        </div>
+        <div class="legend-row">
+          <span class="legend-glow" aria-hidden="true"></span>
+          <span>A glow means the group was active in the last hour.</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="list" class="list" hidden aria-label="Sessions"></section>
+
+    <aside id="reader" class="reader" hidden aria-labelledby="reader-title" tabindex="-1"></aside>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
