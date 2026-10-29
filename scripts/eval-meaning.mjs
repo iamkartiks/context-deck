@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { loadConfig } from '../dist/src/config.js';
-import { createEmbedder } from '../dist/src/embedder.js';
+import { createEmbedder, EmbedError } from '../dist/src/embedder.js';
 import { indexSources } from '../dist/src/indexer.js';
 import { catchUp, combine, searchByMeaning } from '../dist/src/semantic.js';
 import { loadSettings } from '../dist/src/settings.js';
@@ -138,6 +138,33 @@ const settings = {
   ...(v['allow-remote'] ? { allowRemote: true } : {}),
 };
 
+// Check the model answers before doing anything else, and explain how to fix it if not
+console.log(`Model: ${settings.model} via ${settings.api} at ${settings.url}${settings.dims ? `, ${settings.dims} dims` : ''}`);
+try {
+  await createEmbedder(settings).embed(['ContextDeck check'], 'query');
+} catch (err) {
+  if (!(err instanceof EmbedError)) throw err;
+  const ollama = settings.api === 'ollama';
+  console.error(`\nCouldn't use the model: ${err.message}\n`);
+  if (ollama) {
+    console.error(
+      [
+        'To run this check with Ollama:',
+        '  1. Install it: https://ollama.com/download  (on a Mac you can also use: brew install ollama)',
+        '  2. Start it: open the Ollama app, or run `ollama serve` in another terminal',
+        `  3. Get the model: ollama pull ${settings.model}`,
+        '  4. Run this again: npm run eval:meaning',
+        '',
+        'Check it is running with: curl http://127.0.0.1:11434/api/version',
+      ].join('\n'),
+    );
+  }
+  console.error(
+    `\nUsing LM Studio, llama.cpp or vLLM instead? npm run eval:meaning -- --api openai --url http://127.0.0.1:1234 --model <name>`,
+  );
+  process.exit(1);
+}
+
 const dir = mkdtempSync(join(tmpdir(), 'contextdeck-eval-'));
 try {
   // One Claude Code-style session per topic
@@ -164,7 +191,6 @@ try {
   const store = new Store(cfg.dbPath);
   await indexSources(store, cfg.sources);
   const embedder = createEmbedder(settings);
-  console.log(`Model: ${settings.model} via ${settings.api} at ${settings.url}${settings.dims ? `, ${settings.dims} dims` : ''}`);
   const t0 = Date.now();
   const r = await catchUp(store, embedder, cfg.home);
   console.log(`Embedded ${r.pieces} pieces in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`);
