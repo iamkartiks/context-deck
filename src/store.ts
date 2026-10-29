@@ -128,7 +128,16 @@ export interface SearchHit {
   session: SessionRow;
   snippet: string;
   role: string;
+  /** Position of the best-matching message, to open the session right there. */
+  seq: number;
   hits: number;
+}
+
+/** One message in a session that matches a search. */
+export interface SessionMatch {
+  seq: number;
+  role: string;
+  snippet: string;
 }
 
 export interface ProjectRow {
@@ -573,19 +582,21 @@ export class Store {
     params.push(filter.limit ?? 20);
     // FTS auxiliary functions (bm25, snippet) can't run inside an aggregate, so rank every
     // matching message first (materialized), then keep the best-ranked one per session.
+    // bm25 is negative (lower is better); halving it for tool output means a match in
+    // the conversation is shown ahead of a file path or command that happens to match.
     // SQLite returns the bare columns (role, snip) from the row that produced MIN(score).
     const sql = `
       WITH matches AS MATERIALIZED (
-        SELECT m.session_id, m.role, snippet(messages_fts, 0, '«', '»', '…', 14) AS snip,
-               bm25(messages_fts) AS score
+        SELECT m.session_id, m.role, m.seq, snippet(messages_fts, 0, '«', '»', '…', 14) AS snip,
+               bm25(messages_fts) * (CASE WHEN m.role = 'tool' THEN 0.5 ELSE 1.0 END) AS score
         FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
         WHERE messages_fts MATCH ?
       ),
       best AS (
-        SELECT session_id, role, snip, MIN(score) AS best, COUNT(*) AS hits
+        SELECT session_id, role, seq, snip, MIN(score) AS best, COUNT(*) AS hits
         FROM matches GROUP BY session_id
       )
-      SELECT s.*, best.snip, best.role AS hit_role, best.hits, best.best
+      SELECT s.*, best.snip, best.role AS hit_role, best.seq AS hit_seq, best.hits, best.best
       FROM best JOIN sessions s ON s.id = best.session_id
       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
       ORDER BY best.best LIMIT ?`;
@@ -594,12 +605,42 @@ export class Store {
         session: toSessionRow(r),
         snippet: String(r.snip ?? '').replace(/\s+/g, ' '),
         role: String(r.hit_role),
+        seq: Number(r.hit_seq),
         hits: Number(r.hits),
       }));
     } catch (err) {
       if (/fts5|syntax/i.test(String(err))) throw new Error(`Invalid search query: ${query}`);
       throw err;
     }
+  }
+
+  /** Every message in one session that matches a search, in conversation order. */
+  matchesIn(sessionId: string, query: string, limit = 1000): SessionMatch[] {
+    const fts = toFtsQuery(query);
+    if (!fts) return [];
+    try {
+      return (
+        this.db
+          .prepare(
+            `SELECT m.seq, m.role, snippet(messages_fts, 0, '«', '»', '…', 14) AS snip
+             FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
+             WHERE messages_fts MATCH ? AND m.session_id = ?
+             ORDER BY m.seq LIMIT ?`,
+          )
+          .all(fts, sessionId, limit) as Row[]
+      ).map((r) => ({ seq: Number(r.seq), role: String(r.role), snippet: String(r.snip ?? '').replace(/\s+/g, ' ') }));
+    } catch (err) {
+      if (/fts5|syntax/i.test(String(err))) throw new Error(`Invalid search query: ${query}`);
+      throw err;
+    }
+  }
+
+  /** One message by its position in the session. */
+  messageAt(sessionId: string, seq: number): StoredMessage | null {
+    const r = this.db.prepare(`SELECT seq, role, ts, tool_name, text FROM messages WHERE session_id = ? AND seq = ?`).get(sessionId, seq) as
+      | Row
+      | undefined;
+    return r ? { seq: Number(r.seq), role: String(r.role), ts: (r.ts as string | null) ?? null, toolName: (r.tool_name as string | null) ?? null, text: String(r.text) } : null;
   }
 
   /** Sessions grouped by working directory, across every provider. */

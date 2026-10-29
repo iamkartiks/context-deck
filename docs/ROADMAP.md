@@ -31,7 +31,9 @@ Still to do here:
 - [ ] Pinch-to-zoom on touch screens (zoom buttons work today)
 - [ ] Open in other terminals: iTerm2, Ghostty, Warp, Windows Terminal, GNOME Terminal
 - [ ] Your own named groups: drag cards into a group you made, alongside the automatic ones
-- [ ] Notes and pins on cards
+- [x] Decisions: mark the message that settled something; shown on cards, in their own view, in search and in handoff briefs (v0.7)
+- [x] Search shows where it matched, and the side panel steps through every match (v0.7)
+- [ ] Notes on cards
 - [ ] Keyboard navigation between cards (arrow keys)
 - [ ] A Timeline grouping that lays days out left to right
 

@@ -33,6 +33,8 @@ The UI is served by a small HTTP server that only listens on `127.0.0.1`. Becaus
 
 `board.json` (your canvas arrangement) contains only session ids and coordinates.
 
+`decisions.json` holds the decisions you marked: your words, session ids, message positions and a fingerprint of each message. It quotes your sessions, so it's written owner-only (0600) like the index. Adding, editing and removing decisions need the per-run token and a matching Origin like every other write; ids are checked against `d_` plus 10 hex digits, positions must point at a real message, and text is capped at 2,000 characters.
+
 ## Reporting a vulnerability
 
 Please report privately rather than in a public issue. Use GitHub's **Report a vulnerability** button on the repository's Security tab (private vulnerability reporting). Include what you found, how to reproduce it, and its impact. Please don't include real transcript content; a synthetic reproduction is enough.

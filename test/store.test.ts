@@ -192,6 +192,15 @@ describe('Store + indexer', () => {
     assert.equal(store.search('nonexistentword').length, 0);
   });
 
+  it('shows a match in the conversation ahead of one in tool output', () => {
+    // "cookies" is in a prompt and in file paths the agent edited
+    const id = store.resolve('cc:0f3a1b11').id;
+    assert.ok(store.matchesIn(id, 'cookies').some((m) => m.role === 'tool'), 'tool output matches too');
+    const best = store.search('cookies', { provider: 'claude-code' }).find((h) => h.session.id === id)!;
+    assert.notEqual(best.role, 'tool');
+    assert.match(store.messageAt(id, best.seq)!.text, /cookie/i, 'stemming: "cookies" also finds "cookie"');
+  });
+
   it('survives hostile search input', () => {
     assert.doesNotThrow(() => store.search('foo" OR (bar'));
     assert.doesNotThrow(() => store.search('NEAR( * :'));
