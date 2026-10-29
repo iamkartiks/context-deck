@@ -4,6 +4,29 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-29
+
+Search by meaning, with a model on your own computer. Optional, and off until you turn it on.
+
+### Added
+
+- **Search by meaning.** "Which chat decided on the database" finds "let's go with Postgres". Word and meaning results are merged so exact words still win. Results found only by meaning are marked "≈ by meaning", and opening one jumps to the passage that matched.
+- **Turn it on** with `contextdeck semantic enable` or the **≈** button next to the search box in the canvas.
+  - It checks the model answers first, and says exactly what's missing (for example, `ollama pull qwen3-embedding:0.6b`).
+  - It works with Ollama, or any OpenAI-compatible server (LM Studio, llama.cpp, vLLM).
+  - The default `qwen3-embedding:0.6b` handles mixed-language prompts.
+- **Background embedding:**
+  - newest sessions first, with live progress in the canvas;
+  - resumes where it stopped, and only embeds what changed;
+  - kept current by `index`, `watch` and the canvas;
+  - covers prompts, replies, titles and decisions, but not tool output.
+- `contextdeck semantic [status|enable|disable --drop]`, `search --words`, a live check in `doctor`, and `via` on every `search --json` hit.
+- `npm run eval:meaning` reports how well your model finds sessions from paraphrased, Hindi and Hinglish questions.
+
+### Security
+
+- The model server must be on this computer. Another address needs `--allow-remote` on the command line; the canvas never allows it.
+
 ## [0.7.0] - 2026-10-29
 
 Find the session where something was decided.

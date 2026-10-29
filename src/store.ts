@@ -107,6 +107,30 @@ CREATE TABLE IF NOT EXISTS session_files (
   PRIMARY KEY (session_id, path)
 );
 CREATE INDEX IF NOT EXISTS session_files_abs ON session_files(abs_path);
+
+-- Search by meaning (only filled when it's turned on). One row per piece of
+-- text that was turned into a vector: a slice of a message (seq, start, len
+-- point into messages.text, so the text isn't stored twice), a session title,
+-- or a decision. Vectors are int8, length 1 (dot product = cosine).
+CREATE TABLE IF NOT EXISTS chunks (
+  id          INTEGER PRIMARY KEY,
+  model       TEXT NOT NULL,
+  session_id  TEXT NOT NULL,
+  kind        TEXT NOT NULL,
+  ref         TEXT NOT NULL,
+  seq         INTEGER,
+  start       INTEGER,
+  len         INTEGER,
+  vec         BLOB NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS chunks_ref ON chunks(model, session_id, ref);
+-- What each session looked like when it was last embedded, to skip unchanged ones
+CREATE TABLE IF NOT EXISTS embedded_sessions (
+  model       TEXT NOT NULL,
+  session_id  TEXT NOT NULL,
+  sig         TEXT NOT NULL,
+  PRIMARY KEY (model, session_id)
+);
 `;
 
 export interface FileState {
@@ -122,6 +146,21 @@ export interface ListFilter {
   project?: string;
   includeSubagents?: boolean;
   limit?: number;
+}
+
+/** A piece of text and its vector, for search by meaning. */
+export interface ChunkRow {
+  kind: 'message' | 'title' | 'decision';
+  ref: string;
+  seq: number | null;
+  start: number | null;
+  len: number | null;
+  vec: Int8Array;
+}
+
+export interface StoredChunk extends Omit<ChunkRow, 'ref'> {
+  id: number;
+  sessionId: string;
 }
 
 export interface SearchHit {
@@ -633,6 +672,89 @@ export class Store {
       if (/fts5|syntax/i.test(String(err))) throw new Error(`Invalid search query: ${query}`);
       throw err;
     }
+  }
+
+  // ── Search by meaning: storage ────────────────────────────────────────────
+
+  /** Sessions to embed, most recently active first. */
+  sessionsForEmbedding(): { id: string; title: string; updatedAt: string | null; messageCount: number }[] {
+    return (this.db.prepare(`SELECT id, title, updated_at, message_count FROM sessions ORDER BY updated_at DESC`).all() as Row[]).map((r) => ({
+      id: String(r.id),
+      title: String(r.title),
+      updatedAt: (r.updated_at as string | null) ?? null,
+      messageCount: Number(r.message_count),
+    }));
+  }
+
+  embeddedSignatures(model: string): Map<string, string> {
+    const rows = this.db.prepare(`SELECT session_id, sig FROM embedded_sessions WHERE model = ?`).all(model) as Row[];
+    return new Map(rows.map((r) => [String(r.session_id), String(r.sig)]));
+  }
+
+  chunkRefs(model: string, sessionId: string): Map<string, number> {
+    const rows = this.db.prepare(`SELECT id, ref FROM chunks WHERE model = ? AND session_id = ?`).all(model, sessionId) as Row[];
+    return new Map(rows.map((r) => [String(r.ref), Number(r.id)]));
+  }
+
+  /** Add and remove one session's pieces, and record what it looked like, in one step. */
+  applyChunks(model: string, sessionId: string, add: ChunkRow[], removeIds: number[], sig: string | null): void {
+    this.tx(() => {
+      const del = this.db.prepare(`DELETE FROM chunks WHERE id = ?`);
+      for (const id of removeIds) del.run(id);
+      const ins = this.db.prepare(
+        `INSERT OR REPLACE INTO chunks (model, session_id, kind, ref, seq, start, len, vec) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const c of add) {
+        ins.run(model, sessionId, c.kind, c.ref, c.seq, c.start, c.len, new Uint8Array(c.vec.buffer, c.vec.byteOffset, c.vec.byteLength));
+      }
+      if (sig != null) {
+        this.db
+          .prepare(`INSERT INTO embedded_sessions (model, session_id, sig) VALUES (?, ?, ?) ON CONFLICT(model, session_id) DO UPDATE SET sig = excluded.sig`)
+          .run(model, sessionId, sig);
+      }
+    });
+  }
+
+  /** Drop vectors from other models and for sessions that are gone. */
+  pruneChunks(model: string): number {
+    let removed = 0;
+    this.tx(() => {
+      removed += Number(this.db.prepare(`DELETE FROM chunks WHERE model != ? OR session_id NOT IN (SELECT id FROM sessions)`).run(model).changes);
+      this.db.prepare(`DELETE FROM embedded_sessions WHERE model != ? OR session_id NOT IN (SELECT id FROM sessions)`).run(model);
+    });
+    return removed;
+  }
+
+  dropChunks(): void {
+    this.db.exec(`DELETE FROM chunks; DELETE FROM embedded_sessions;`);
+  }
+
+  /** Changes whenever vectors are added or removed, to know when a cached copy is stale. */
+  chunkStamp(model: string): string {
+    const r = this.db.prepare(`SELECT COUNT(*) AS n, MAX(id) AS m FROM chunks WHERE model = ?`).get(model) as Row;
+    return `${r.n}:${r.m ?? 0}`;
+  }
+
+  chunkStats(model: string): { pieces: number; sessions: number; bytes: number } {
+    const r = this.db
+      .prepare(`SELECT COUNT(*) AS n, COUNT(DISTINCT session_id) AS s, COALESCE(SUM(LENGTH(vec)), 0) AS b FROM chunks WHERE model = ?`)
+      .get(model) as Row;
+    return { pieces: Number(r.n), sessions: Number(r.s), bytes: Number(r.b) };
+  }
+
+  loadChunks(model: string): StoredChunk[] {
+    return (this.db.prepare(`SELECT id, session_id, kind, seq, start, len, vec FROM chunks WHERE model = ?`).all(model) as Row[]).map((r) => {
+      const b = r.vec as Uint8Array;
+      return {
+        id: Number(r.id),
+        sessionId: String(r.session_id),
+        kind: String(r.kind) as ChunkRow['kind'],
+        seq: r.seq == null ? null : Number(r.seq),
+        start: r.start == null ? null : Number(r.start),
+        len: r.len == null ? null : Number(r.len),
+        vec: new Int8Array(b.buffer, b.byteOffset, b.byteLength),
+      };
+    });
   }
 
   /** One message by its position in the session. */

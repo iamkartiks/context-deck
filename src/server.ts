@@ -22,6 +22,8 @@ import type { Store } from './store.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildBrief, finalizeBrief, handoffTargets, saveBrief, startLaunch } from './handoff.js';
+import { MeaningService } from './meaning.js';
+import { isLocalUrl, type SemanticSettings } from './settings.js';
 import { commandText, findTerminal, openInTerminal, type Launch, type TerminalInfo } from './platform.js';
 import { HANDOFF_ID_RE } from './handoff-marker.js';
 
@@ -80,6 +82,8 @@ export interface UiServerOptions {
   launchTerminal?: (launch: Launch) => Promise<void>;
   /** Summary of the index run that happened just before starting, shown in the UI. */
   initialIndex?: IndexSummary;
+  /** Search by meaning (tests pass their own). */
+  meaning?: MeaningService;
 }
 
 export interface UiServer {
@@ -151,6 +155,7 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       throw new HttpError(500, `Couldn't open a terminal: ${(err as Error).message}`);
     }
   };
+  const meaning = opts.meaning ?? new MeaningService(store, cfg.home);
   const clients = new Set<ServerResponse>();
   let port = 0;
   let lastIndex: IndexSummary | null = opts.initialIndex ?? null;
@@ -182,6 +187,7 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
         shortPrefix: getAdapter(id)?.shortPrefix ?? id.slice(0, 2),
       })),
       lastIndex,
+      meaning: meaning.status(),
       sources: cfg.sources.map((s) => ({ provider: s.adapter.id, label: s.adapter.label, root: s.root })),
       capabilities: {
         openTerminal: canOpenTerminal,
@@ -306,9 +312,17 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       const q = (url.searchParams.get('q') ?? '').slice(0, 500);
       const provider = url.searchParams.get('provider') ?? undefined;
       try {
-        const hits = store.search(q, { provider, limit: 200 });
+        const words = store.search(q, { provider, limit: 200 });
+        const found = await meaning.search(q, words, 200);
+        const providerId = provider ? (getAdapter(provider)?.id ?? provider) : null;
+        const hits = providerId ? found.hits.filter((h) => h.session.provider === providerId) : found.hits;
         const decisions = q.trim() ? allDecisions().filter((d) => decisionMatches(d, q) && (!provider || d.session?.provider === provider)) : [];
-        return send(res, 200, { query: q, hits, decisions: decisions.map(decisionView) });
+        return send(res, 200, {
+          query: q,
+          hits,
+          decisions: decisions.map(decisionView),
+          meaning: { used: found.usedMeaning, error: found.error },
+        });
       } catch (err) {
         throw new HttpError(400, (err as Error).message);
       }
@@ -385,7 +399,32 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       lastIndex = sum;
       version++;
       broadcast('index', { version, summary: sum });
+      meaning.kick();
       return send(res, 200, sum);
+    }
+
+    if (method === 'GET' && path === '/api/semantic') return send(res, 200, meaning.status());
+
+    // Turn search by meaning on (after checking the model answers) or off
+    if (method === 'PUT' && path === '/api/semantic') {
+      const body = (await readBody(req)) as { enabled?: unknown; api?: unknown; url?: unknown; model?: unknown; dims?: unknown; drop?: unknown } | null;
+      if (!body || typeof body.enabled !== 'boolean') throw new HttpError(400, 'Expected {"enabled": true|false}.');
+      if (!body.enabled) return send(res, 200, meaning.disable({ drop: body.drop === true }));
+      const input: Partial<SemanticSettings> = {};
+      if (body.api === 'ollama' || body.api === 'openai') input.api = body.api;
+      if (typeof body.url === 'string' && body.url.trim()) input.url = body.url.trim().replace(/\/+$/, '');
+      if (typeof body.model === 'string' && /^[\w.:/@+-]{1,200}$/.test(body.model.trim())) input.model = body.model.trim();
+      else if (body.model !== undefined) throw new HttpError(400, 'That model name has characters a model name can’t have.');
+      if (typeof body.dims === 'number' && Number.isInteger(body.dims) && body.dims >= 0 && body.dims <= 8192) input.dims = body.dims;
+      // Sending session text to another computer is only allowed from the command line, deliberately
+      if (input.url && !isLocalUrl(input.url)) {
+        throw new HttpError(400, 'That address isn’t on this computer. To send session text to another machine, use `contextdeck semantic enable --url … --allow-remote`.');
+      }
+      try {
+        return send(res, 200, await meaning.enable(input));
+      } catch (err) {
+        throw new HttpError(400, (err as Error).message);
+      }
     }
 
     if (method === 'GET' && path === '/api/handoff/preview') {
@@ -528,8 +567,11 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       lastIndex = summary;
       version++;
       broadcast('index', { version, summary });
+      if (summary.indexed || summary.removed) meaning.kick();
     });
   }
+  const stopMeaningEvents = meaning.onChange((status) => broadcast('semantic', status));
+  meaning.kick();
   const heartbeat = setInterval(() => {
     for (const res of clients) res.write(': keep-alive\n\n');
   }, 25_000);
@@ -542,6 +584,8 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       new Promise<void>((resolve) => {
         clearInterval(heartbeat);
         watcher?.close();
+        stopMeaningEvents();
+        meaning.stop();
         for (const res of clients) res.end();
         clients.clear();
         server.close(() => resolve());
