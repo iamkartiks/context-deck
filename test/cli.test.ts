@@ -52,7 +52,13 @@ describe('cli', () => {
 
   it('resume prints the command without running it', () => {
     const r = run('resume', 'cc:0f3a1b11');
-    assert.equal(r.out.trim(), 'cd /Users/alice/code/acme-shop && claude --resume 7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11');
+    // In the shell of the system the tests run on
+    assert.equal(
+      r.out.trim(),
+      process.platform === 'win32'
+        ? 'Set-Location /Users/alice/code/acme-shop; claude --resume 7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11'
+        : 'cd /Users/alice/code/acme-shop && claude --resume 7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11',
+    );
   });
 
   it('related, projects, stats and doctor succeed', () => {
@@ -69,7 +75,11 @@ describe('cli', () => {
     assert.match(printed.out, /ContextDeck handoff hf_[0-9a-f]{10} from claude-code:/);
 
     const saved = JSON.parse(run('handoff', 'cc:0f3a1b11', '--json').out);
-    assert.match(saved.command, /^codex "\$\(cat '?.*\.md'?\)"$/, 'defaults to the other tool');
+    assert.match(
+      saved.command,
+      process.platform === 'win32' ? /^codex 'Continue: .* Read the handoff brief in .*\.md and follow it\. \(ContextDeck handoff / : /^codex "\$\(cat '?.*\.md'?\)"$/,
+      'defaults to the other tool',
+    );
     assert.equal(JSON.parse(run('handoff', 'cx:d5e6f701', '--json').out).command.startsWith('claude '), true);
     assert.equal(JSON.parse(run('handoff', 'cc:0f3a1b11', '--to', 'cc', '--json').out).command.startsWith('claude '), true);
     assert.equal(run('handoff', 'cc:0f3a1b11', '--to', 'gemini').code, 2);

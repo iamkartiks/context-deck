@@ -250,7 +250,7 @@ function cmdShow(store: Store, v: Values, args: string[]): void {
         out.push(`${who} ${c.dim(ago(m.ts))}`, indent(text), '');
       }
     }
-    if (resume) out.push(c.bold('Resume'), `  ${resume.display}`);
+    if (resume) out.push(c.bold('Resume'), `  ${commandText({ cwd: resume.cwd, command: resume.command, args: resume.args }, process.platform)}`);
     return out.join('\n').trimEnd();
   });
 }
