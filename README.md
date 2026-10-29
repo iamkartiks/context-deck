@@ -39,7 +39,7 @@ $ contextdeck resume cx:d5e6f701 --run     # reopens it in Codex, in the right f
 
 ## Principles
 
-- **Local only.** Nothing leaves your machine. No accounts, no telemetry, no network calls.
+- **Local only.** Nothing leaves your machine. No accounts, no telemetry, no network calls. (Optional search by meaning talks to a model server on your own computer, and only after you turn it on.)
 - **Read only.** Your agents' session files are never modified. The index is a disposable cache; delete it any time.
 - **Secrets stripped at the door.** API keys, tokens, passwords and private keys are redacted before anything is indexed.
 - **Zero native dependencies.** Built on Node's built-in SQLite, so installing never involves compiling anything.
@@ -79,7 +79,7 @@ contextdeck ui      # indexes, then opens the canvas in your browser
 | **Move around** | Drag the background, or scroll. Pinch or ⌘/Ctrl+scroll to zoom. `+` `-` zoom, `0` shows everything. |
 | **Arrange** | Drag cards anywhere; positions are saved per grouping. **Tidy up** lines everything up in a grid; **Scatter** goes back to the loose layout with your placements. |
 | **Group by** | **Workstream** (linked work across tools), **Project**, **Tool** or **Day**. Threads between cards show sessions that edited the same files. |
-| **Search** | Press `/`. The board narrows to matching sessions (searching their full conversations, titles, projects and branches) and each card shows the line that matched and how many times. Open one and it scrolls to that message. |
+| **Search** | Press `/`. The board narrows to matching sessions (searching their full conversations, titles, projects and branches) and each card shows the line that matched and how many times. Open one and it scrolls to that message. With [search by meaning](#search-by-meaning-optional) on, the button next to the search box, sessions about the same thing show up too, marked "≈ by meaning". |
 | **Read** | Click a card: context use over the session (real per-turn data, with each compaction marked), files it changed, related sessions in other tools, subagents, and the conversation (tool calls hidden unless you ask). **Find in this conversation** steps through every match, loading older parts of long sessions as needed. |
 | **Decisions** | Hover a message and choose **Mark as decision** (select part of it first to quote just that). See [Decisions](#decisions). |
 | **Resume** | **Copy command**, or **Open in Terminal**, which runs it in a new terminal window in the right folder (see [Windows, macOS and Linux](#windows-macos-and-linux)). |
@@ -100,6 +100,7 @@ Claude Code doesn't record how big its context window is, so its fill level is a
 | `list` | Recent sessions across every tool. `--all` includes subagents. |
 | `search <query>` | Full-text search. Words are ANDed; `"exact phrase"`, `prefix*` and `OR` work. Matching decisions are listed first. |
 | `decisions [query]` | Decisions you marked, across every tool. `--project`, `-p` and `--json` work here too. |
+| `semantic [status\|enable\|disable]` | [Search by meaning](#search-by-meaning-optional) with a local embedding model. Off until you enable it. |
 | `show <id>` | Metadata, decisions, files touched, context usage, last messages and the resume command. `--all` adds tool calls, `-m 30` shows more. |
 | `resume <id> [--run]` | Print, or run, the command that reopens the session in its own tool and folder. |
 | `handoff <id> [--to codex\|claude-code] [--print\|--run]` | Continue a session's work in a new session. Saves a brief and prints the command that starts it; `--run` starts it here, `--print` just shows the brief. Defaults to the other tool. |
@@ -151,6 +152,7 @@ Decisions are yours, so they're kept in `~/.contextdeck/decisions.json` (readabl
 | Your canvas arrangement | `~/.contextdeck/board.json` | same folder as the index |
 | Handoff briefs | `~/.contextdeck/handoffs/` | same folder as the index |
 | Your decisions | `~/.contextdeck/decisions.json` | same folder as the index |
+| Your settings (search by meaning) | `~/.contextdeck/config.json` | same folder as the index |
 
 ## Windows, macOS and Linux
 
@@ -165,6 +167,34 @@ The CLI and the canvas work the same everywhere. The session folders above are f
 - **Linux over SSH**, or with no terminal app installed: there's no window to open, so the canvas shows **Copy command** only. `contextdeck doctor` tells you which terminal it found.
 - **Windows** support is tested by CI on every change but hasn't had much use on real machines yet. Please [report anything odd](https://github.com/iamkartiks/context-deck/issues). Commands that contain characters cmd.exe treats specially (`" % ^ & | < > !`) are never sent to a new window; you'll be asked to copy them instead.
 - **WSL:** if your agents run inside WSL, their sessions live in WSL's home folder. Run ContextDeck inside WSL too, or point it there from Windows with `--claude-dir \\wsl$\Ubuntu\home\<you>\.claude` (and `--codex-dir` likewise).
+
+## Search by meaning (optional)
+
+Word search finds what you typed. Search by meaning finds what you *meant*: "which chat decided on the database" finds the session where the agent said "let's go with Postgres", and "making the database upgrade safe" finds "plan the Postgres 15 to 17 upgrade with as little downtime as possible". It uses an embedding model that runs on your computer, so nothing leaves it.
+
+![Searching "making the database upgrade safe" with search by meaning on: the Postgres-on-RDS upgrade session is found by meaning, and the side panel opens at the message that matched.](docs/images/meaning.png)
+
+It's **off until you turn it on**, because it needs a local model. With [Ollama](https://ollama.com):
+
+```bash
+ollama pull qwen3-embedding:0.6b
+contextdeck semantic enable
+```
+
+Or click the **≈** button next to the search box in the canvas. ContextDeck checks the model answers, then embeds your sessions in the background, newest first. Search uses what's done straight away, and new sessions are added as they come in. `contextdeck semantic` shows how far it got; Ctrl+C or closing the canvas pauses it, and it carries on next time.
+
+| | |
+|---|---|
+| **Which model** | `qwen3-embedding:0.6b` (the default) handles many languages and code, so it's the one to use if you write prompts in more than one language, Hindi and English, say. `bge-m3` is the other good multilingual choice. For English only, `embeddinggemma` and `nomic-embed-text` are smaller and faster. |
+| **Other servers** | LM Studio, llama.cpp's server and vLLM work too: `contextdeck semantic enable --api openai --url http://127.0.0.1:1234 --model <name>`. |
+| **What's embedded** | Your prompts, the agents' replies (long ones in overlapping pieces), session titles and your decisions. Not tool output: file dumps and logs would drown out what was said. |
+| **How results mix** | Word matches and meaning matches are merged, so an exact word still wins. Results found only by meaning are marked "≈ by meaning" and opening one jumps to the passage that matched. If the model isn't running, search quietly falls back to words. |
+| **Size** | About 0.5 KB per piece of text with the default 512 numbers per vector (`--dims` changes it), kept in the index file. |
+| **Turning it off** | `contextdeck semantic disable` (add `--drop` to delete the vectors), or **Turn off** in the canvas. |
+
+**How well does it work with your model?** `npm run eval:meaning` builds a small set of made-up sessions and asks questions that share few or no words with the answer, in English, Hindi and Hinglish, then reports how often the right session comes first. Try other models with `-- --model bge-m3`. With a tiny English-only test model it found the right session first for 7 of 10 English questions where word search found none; mixed-language questions need a multilingual model like the default.
+
+The model server must be on this computer. Pointing ContextDeck at one elsewhere sends your session text there, so it's refused unless you add `--allow-remote` on the command line; the canvas never allows it.
 
 ## Local and open models (Qwen, DeepSeek, …)
 

@@ -231,6 +231,7 @@ const state = {
   detail: null,
   search: null, // { q, ids:Set, hits:Map(sessionId → best hit), decisionHits:Map(sessionId → decisions) }
   decisions: null, // every decision, for the Decisions view (loaded when needed)
+  meaning: null, // search by meaning: { enabled, state, model, url, api, pieces, sessions, progress, error }
   find: null, // { q, matches:[seq], index } for "find in this conversation"
   cam: { x: 32, y: 30, k: 0.7 },
   pos: new Map(),
@@ -250,6 +251,8 @@ const els = {
   empty: $('#empty'),
   list: $('#list'),
   decisions: $('#decisions'),
+  meaningBtn: $('#meaning-btn'),
+  meaningPanel: $('#meaning-panel'),
   reader: $('#reader'),
   q: $('#q'),
   count: $('#count'),
@@ -463,11 +466,14 @@ function cardChildren(item) {
   const age = ago(item.updatedAt);
   const { hit, decision } = matchOf(item.id);
   // While searching, a card shows where it matched instead of its title
+  const byMeaning = hit?.via === 'meaning';
   const title = decision
     ? h('span', { class: 'title snip decided' }, flag(), ' ', shortTitle(decision.text, 110))
-    : hit
-      ? h('span', { class: 'title snip' }, marked(hit.snippet))
-      : h('span', { class: 'title' }, shortTitle(item.title));
+    : byMeaning
+      ? h('span', { class: 'title snip meaning' }, shortTitle(hit.snippet, 120))
+      : hit
+        ? h('span', { class: 'title snip' }, marked(hit.snippet))
+        : h('span', { class: 'title' }, shortTitle(item.title));
   return [
     fill,
     h(
@@ -478,8 +484,10 @@ function cardChildren(item) {
       h(
         'span',
         { class: 'foot' },
-        hit
-          ? h('span', { class: 'helpers' }, plural(hit.hits, 'match', 'matches'))
+        byMeaning
+          ? h('span', { class: 'helpers by-meaning', title: 'Found by meaning: no words matched' }, '≈ by meaning')
+          : hit
+            ? h('span', { class: 'helpers' }, plural(hit.hits, 'match', 'matches'))
           : helpers
             ? h('span', { class: 'helpers' }, `+${plural(helpers, 'subagent')}`)
             : null,
@@ -502,7 +510,7 @@ function cardLabel(item) {
   const decided = state.board.decisionCounts?.[item.id] ?? 0;
   return [
     item.title,
-    decision ? `Matching decision: ${decision.text}` : hit ? `Matches: ${hit.snippet.replace(/[«»]/g, '')}` : '',
+    decision ? `Matching decision: ${decision.text}` : hit ? `${hit.via === 'meaning' ? 'Found by meaning' : 'Matches'}: ${hit.snippet.replace(/[«»]/g, '')}` : '',
     decided ? plural(decided, 'decision') : '',
     `${toolLabel(item.provider)}, ${item.project ?? 'no project'}`,
     `updated ${agoLong(item.updatedAt)}`,
@@ -869,9 +877,11 @@ function renderList() {
           ),
           decision
             ? h('span', { class: 'r-snip decided' }, flag(), ' ', decision.text)
-            : hit
-              ? h('span', { class: 'r-snip' }, marked(hit.snippet), h('span', { class: 'r-hits' }, ` · ${plural(hit.hits, 'match', 'matches')}`))
-              : null,
+            : hit?.via === 'meaning'
+              ? h('span', { class: 'r-snip meaning' }, h('span', { class: 'r-hits' }, '≈ by meaning · '), hit.snippet)
+              : hit
+                ? h('span', { class: 'r-snip' }, marked(hit.snippet), h('span', { class: 'r-hits' }, ` · ${plural(hit.hits, 'match', 'matches')}`))
+                : null,
         ),
         h('span', { class: 'r-where' }, [item.project ?? 'no project', item.gitBranch].filter(Boolean).join(' · ')),
         h(
@@ -958,6 +968,166 @@ function renderDecisions() {
   }
   els.decisions.replaceChildren(inner);
 }
+
+// ── Search by meaning ─────────────────────────────────────────────────────
+
+const MEANING_MODELS = [
+  ['qwen3-embedding:0.6b', 'many languages and code (recommended)'],
+  ['bge-m3', 'many languages'],
+  ['embeddinggemma', 'English, small'],
+  ['nomic-embed-text', 'English, small'],
+];
+
+function meaningLabel(m) {
+  if (!m?.enabled) return 'off';
+  if (m.state === 'catching-up') return m.progress?.sessionsTotal ? `catching up, ${m.progress.sessionsDone} of ${m.progress.sessionsTotal} sessions` : 'catching up';
+  if (m.state === 'error') return 'can’t reach the model';
+  return 'on';
+}
+
+function renderMeaningButton() {
+  const m = state.meaning;
+  const b = els.meaningBtn;
+  b.classList.toggle('on', !!m?.enabled);
+  b.classList.toggle('busy', m?.state === 'catching-up');
+  b.classList.toggle('problem', m?.state === 'error');
+  const label = `Search by meaning: ${meaningLabel(m)}`;
+  b.setAttribute('aria-label', label);
+  b.title = label;
+}
+
+function setMeaningPanel(open) {
+  els.meaningPanel.hidden = !open;
+  els.meaningBtn.setAttribute('aria-expanded', String(open));
+  if (open) {
+    renderMeaningPanel();
+    $('input, button', els.meaningPanel)?.focus();
+  }
+}
+
+function renderMeaningPanel() {
+  if (els.meaningPanel.hidden) return;
+  const m = state.meaning ?? { enabled: false, api: 'ollama', url: 'http://127.0.0.1:11434', model: 'qwen3-embedding:0.6b' };
+  const alert = h('p', { class: 'warn', role: 'alert', hidden: true });
+  const fail = (err) => {
+    alert.textContent = err.message;
+    alert.hidden = false;
+  };
+  const head = [
+    h('div', { class: 'mp-head' }, h('h2', {}, 'Search by meaning'), h('span', { class: `mp-state ${m.enabled ? m.state : 'off'}` }, meaningLabel(m))),
+    h(
+      'p',
+      { class: 'mp-lead' },
+      'Finds sessions by what they’re about, not only the words in them: “which chat decided on the database” finds “let’s go with Postgres”. It uses an embedding model running on your computer, so nothing leaves it.',
+    ),
+  ];
+
+  if (!m.enabled || m.state === 'error') {
+    const model = h('input', { type: 'text', class: 'mp-input', list: 'mp-models', value: m.model, spellcheck: 'false', autocomplete: 'off', 'aria-label': 'Model' });
+    const url = h('input', { type: 'url', class: 'mp-input', value: m.url, spellcheck: 'false', autocomplete: 'off', 'aria-label': 'Model server address' });
+    const kind = h(
+      'select',
+      { class: 'mp-input', 'aria-label': 'Kind of server' },
+      h('option', { value: 'ollama', selected: m.api === 'ollama' }, 'Ollama'),
+      h('option', { value: 'openai', selected: m.api === 'openai' }, 'OpenAI-compatible (LM Studio, llama.cpp, vLLM)'),
+    );
+    kind.addEventListener('change', () => {
+      // Swap the default address along with the kind, unless it was changed by hand
+      if (url.value === 'http://127.0.0.1:11434' || url.value === 'http://127.0.0.1:1234') url.value = kind.value === 'ollama' ? 'http://127.0.0.1:11434' : 'http://127.0.0.1:1234';
+    });
+    const pull = h('code', {}, `ollama pull ${m.model}`);
+    model.addEventListener('input', () => (pull.textContent = `ollama pull ${model.value.trim() || 'qwen3-embedding:0.6b'}`));
+    const go = h('button', { type: 'submit', class: 'pill solid' }, m.state === 'error' ? 'Try again' : 'Check and turn on');
+    const form = h(
+      'form',
+      {
+        class: 'mp-form',
+        onsubmit: async (e) => {
+          e.preventDefault();
+          alert.hidden = true;
+          go.disabled = true;
+          go.textContent = 'Checking the model…';
+          try {
+            state.meaning = await api('/api/semantic', { method: 'PUT', body: { enabled: true, model: model.value.trim(), url: url.value.trim(), api: kind.value } });
+            renderMeaningButton();
+            renderMeaningPanel();
+            toast('Search by meaning is on. Your sessions are being embedded in the background.');
+          } catch (err) {
+            go.disabled = false;
+            go.textContent = 'Check and turn on';
+            fail(err);
+          }
+        },
+      },
+      h('ol', { class: 'mp-steps' },
+        h('li', {}, 'Install ', h('a', { href: 'https://ollama.com', target: '_blank', rel: 'noopener noreferrer' }, 'Ollama'), ' (or LM Studio, llama.cpp, vLLM).'),
+        h('li', {}, 'Get an embedding model: ', pull, h('button', { type: 'button', class: 'text-button', onclick: async (e) => {
+          try {
+            await navigator.clipboard.writeText(pull.textContent);
+            e.currentTarget.textContent = 'Copied';
+          } catch {
+            toast('Copy didn’t work here; select the command instead.');
+          }
+        } }, 'Copy')),
+        h('li', {}, 'Check it answers, and turn this on.'),
+      ),
+      h('label', { class: 'mp-field' }, h('span', {}, 'Model'), model),
+      h('datalist', { id: 'mp-models' }, MEANING_MODELS.map(([v, note]) => h('option', { value: v }, note))),
+      h('p', { class: 'note' }, 'For prompts in more than one language (Hindi and English, say), use qwen3-embedding or bge-m3. For English only, embeddinggemma is smaller.'),
+      h('label', { class: 'mp-field' }, h('span', {}, 'Server'), url),
+      h('label', { class: 'mp-field' }, h('span', {}, 'Kind'), kind),
+      m.state === 'error' && m.error ? h('p', { class: 'warn' }, m.error) : null,
+      alert,
+      h('div', { class: 'actions' }, go, m.enabled ? h('button', { type: 'button', class: 'text-button', onclick: () => turnOff(false) }, 'Turn off') : null),
+    );
+    els.meaningPanel.replaceChildren(...head, form);
+    return;
+  }
+
+  const p = m.progress;
+  const pct = p?.sessionsTotal ? Math.round((p.sessionsDone / p.sessionsTotal) * 100) : null;
+  els.meaningPanel.replaceChildren(
+    ...head,
+    h(
+      'dl',
+      { class: 'mp-facts' },
+      h('dt', {}, 'Model'), h('dd', {}, m.model),
+      h('dt', {}, 'Server'), h('dd', {}, m.url),
+      h('dt', {}, 'Covered'), h('dd', {}, `${plural(m.sessions, 'session')}, ${plural(m.pieces, 'piece')} of text`),
+    ),
+    m.state === 'catching-up'
+      ? h(
+          'div',
+          { class: 'mp-progress' },
+          h('div', { class: 'bar-big' }, h('span', { style: { width: `${pct ?? 0}%` } })),
+          h('p', { class: 'note' }, p?.sessionsTotal ? `Embedding ${p.sessionsDone} of ${p.sessionsTotal} sessions, newest first. Search already uses what’s done.` : 'Getting started…'),
+        )
+      : h('p', { class: 'note' }, 'New and changed sessions are embedded as they come in. Results found this way are marked “≈ by meaning”.'),
+    alert,
+    h(
+      'div',
+      { class: 'actions' },
+      h('button', { type: 'button', class: 'pill outline small', onclick: () => turnOff(false) }, 'Turn off'),
+      h('button', { type: 'button', class: 'text-button', onclick: () => turnOff(true), title: 'Also delete the stored vectors' }, 'Turn off and delete vectors'),
+    ),
+  );
+
+  async function turnOff(drop) {
+    try {
+      state.meaning = await api('/api/semantic', { method: 'PUT', body: { enabled: false, drop } });
+      renderMeaningButton();
+      renderMeaningPanel();
+      if (state.search) runSearch();
+    } catch (err) {
+      fail(err);
+    }
+  }
+}
+
+els.meaningBtn.addEventListener('click', () => setMeaningPanel(els.meaningPanel.hidden));
+document.addEventListener('pointerdown', (e) => {
+  if (!els.meaningPanel.hidden && !e.target.closest('.search-wrap')) setMeaningPanel(false);
+});
 
 // ── Search ────────────────────────────────────────────────────────────────
 
@@ -1050,7 +1220,8 @@ async function select(id, { focusReader = true, seq: target = null, keepPlace = 
 /** The message to open a session at while searching: a matching decision, else the best match. */
 function searchTarget(id) {
   const { hit, decision } = matchOf(id);
-  return decision?.seq ?? hit?.seq ?? null;
+  // A session found through its title has no message to jump to (seq -1)
+  return decision?.seq ?? (hit && hit.seq >= 0 ? hit.seq : null);
 }
 
 /** For long sessions showing an older window: keep showing that window on refresh. */
@@ -1110,7 +1281,8 @@ function updateFindCount() {
   else {
     // The session can match through one of its decisions rather than a message
     const n = (state.detail?.decisions ?? []).filter((d) => decisionMatches(d, f.q)).length;
-    el.textContent = n ? (n === 1 ? 'In a decision' : `In ${n} decisions`) : 'No matches';
+    const byMeaning = state.search?.q === f.q && state.search.hits?.get(state.selected)?.via === 'meaning';
+    el.textContent = n ? (n === 1 ? 'In a decision' : `In ${n} decisions`) : byMeaning ? 'Matched by meaning' : 'No matches';
   }
 }
 
@@ -2055,6 +2227,10 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape') {
     if (composer) return closeComposer();
+    if (!els.meaningPanel.hidden) {
+      setMeaningPanel(false);
+      return els.meaningBtn.focus();
+    }
     if (e.target === els.q && els.q.value) return clearSearch();
     if (state.selected) return closeReader();
     if (state.search) return clearSearch();
@@ -2090,6 +2266,10 @@ function setBoard(board) {
   const before = state.board ? new Map(state.board.sessions.map((x) => [x.id, x.updatedAt])) : null;
   state.board = board;
   state.byId = new Map(board.sessions.map((x) => [x.id, x]));
+  if (board.meaning) {
+    state.meaning = board.meaning;
+    renderMeaningButton();
+  }
   state.loadedAt = new Date();
   layout();
   render();
@@ -2128,6 +2308,19 @@ function connectEvents() {
     }
   });
   es.addEventListener('index', () => refresh().catch(() => {}));
+  // Search by meaning: progress while catching up, and when it's turned on or off
+  es.addEventListener('semantic', (e) => {
+    const was = state.meaning?.state;
+    try {
+      state.meaning = JSON.parse(e.data);
+    } catch {
+      return;
+    }
+    renderMeaningButton();
+    renderMeaningPanel();
+    // Finished catching up: what's on screen can now be found by meaning too
+    if (was === 'catching-up' && state.meaning.state === 'ready' && state.search) runSearch();
+  });
   // Decisions changed (here, in another tab, or from the CLI): reload what shows them
   es.addEventListener('decisions', async () => {
     const open = state.selected;

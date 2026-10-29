@@ -41,7 +41,11 @@ Still to do here:
 
 - [x] **Workstreams**: sessions linked across tools by shared files and feature branch (v0.2)
 - [ ] Use time too: sessions within an hour of each other in the same folder probably belong together
-- [ ] Local embeddings (e.g. `sqlite-vec`) for "find sessions like this one" and automatic clustering
+- [x] **Search by meaning** with a local embedding model (Ollama or any OpenAI-compatible server), off by default (v0.8)
+- [ ] Use the same vectors for "sessions like this one", meaning in "find in this conversation", and automatic clustering
+- [ ] Suggest decisions: ask the local model which messages settled something
+- [ ] A built-in model for people without Ollama (optional install; the runtime is ~300 MB)
+- [ ] `sqlite-vec` for very large histories (the in-memory scan takes ~0.1 s per 100k pieces today)
 - [ ] Auto titles and tags from a small local model, opt-in
 - [ ] Duplicate and stale detection: "you've asked about this migration in 4 sessions across 2 tools"
 

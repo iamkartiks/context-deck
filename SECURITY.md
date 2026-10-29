@@ -33,6 +33,12 @@ The UI is served by a small HTTP server that only listens on `127.0.0.1`. Becaus
 
 `board.json` (your canvas arrangement) contains only session ids and coordinates.
 
+**Search by meaning** is off by default; while off, nothing talks to any model.
+- **What's sent:** when on, ContextDeck sends prompts, replies, titles and decisions (already redacted) to the embedding server in `~/.contextdeck/config.json` (owner-only).
+- **Where it can go:** that server must be on this computer (`localhost`, `127.x`, `::1`). Any other address is refused unless set from the command line with `--allow-remote`. The canvas can't turn that on, and `PUT /api/semantic` rejects non-local addresses.
+- **Checks:** model names are checked against a strict character set, and URLs can't carry credentials. Turning it on or off needs the per-run token and a matching Origin, like every write.
+- **Where vectors live:** in the index (`chunks` table), which is a cache. `contextdeck semantic disable --drop` deletes them.
+
 `decisions.json` holds the decisions you marked: your words, session ids, message positions and a fingerprint of each message. It quotes your sessions, so it's written owner-only (0600) like the index. Adding, editing and removing decisions need the per-run token and a matching Origin like every other write; ids are checked against `d_` plus 10 hex digits, positions must point at a real message, and text is capped at 2,000 characters.
 
 ## Reporting a vulnerability

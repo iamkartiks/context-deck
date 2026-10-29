@@ -9,7 +9,7 @@ import { indexSources } from '../src/indexer.js';
 import { commandText } from '../src/platform.js';
 import { startUiServer, type UiServer } from '../src/server.js';
 import { Store } from '../src/store.js';
-import { scratch } from './helpers.js';
+import { scratch, startFakeModelServer, type FakeModelServer } from './helpers.js';
 
 interface Res {
   status: number;
@@ -517,6 +517,79 @@ describe('ui server: finding things and decisions', () => {
     await call(server.port, '/api/decisions', { method: 'POST', body: { sessionId: 'cc:0f3a1b11', seq, text: 'Keep the header path for mobile' }, headers: auth() });
     const p = (await call(server.port, '/api/handoff/preview?id=cc%3A0f3a1b11&to=codex')).json();
     assert.match(p.brief, /## Decisions already made\n\n- Keep the header path for mobile\n/);
+  });
+});
+
+describe('ui server: search by meaning', () => {
+  const s = scratch();
+  const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex, qwenDir: s.qwen }, {});
+  let store: Store;
+  let server: UiServer;
+  let model: FakeModelServer;
+  const events: string[] = [];
+  const auth = () => ({ 'X-ContextDeck-Token': server.token });
+  const put = (body: unknown, headers: Record<string, string> = auth()) => call(server.port, '/api/semantic', { method: 'PUT', body, headers });
+
+  before(async () => {
+    model = await startFakeModelServer();
+    store = new Store(cfg.dbPath);
+    await indexSources(store, cfg.sources);
+    server = await startUiServer(store, cfg, { port: 0, watch: false, terminal: null });
+  });
+  after(async () => {
+    await server.close();
+    store.close();
+    await model.close();
+    s.cleanup();
+  });
+
+  it('starts off, and the board says so', async () => {
+    const b = (await call(server.port, '/api/board')).json();
+    assert.equal(b.meaning.enabled, false);
+    assert.equal(b.meaning.state, 'off');
+    const r = (await call(server.port, '/api/search?q=cookie')).json();
+    assert.deepEqual(r.meaning, { used: false, error: null });
+    assert.ok(r.hits.every((h: { via: string }) => h.via === 'words'));
+  });
+
+  it('turns on only with the token, a local address and a model that answers', async () => {
+    assert.equal((await put({ enabled: true, url: model.url }, {})).status, 403);
+    const remote = await put({ enabled: true, url: 'https://embed.example.com' });
+    assert.equal(remote.status, 400);
+    assert.match(remote.json().error, /isn’t on this computer.*--allow-remote/);
+    const missing = await put({ enabled: true, url: model.url, model: 'nope:1b' });
+    assert.equal(missing.status, 400);
+    assert.match(missing.json().error, /ollama pull nope:1b/);
+    assert.equal((await put({ enabled: true, url: model.url, model: 'a b' })).status, 400);
+    assert.equal((await call(server.port, '/api/semantic')).json().enabled, false, 'nothing saved after failures');
+
+    const ok = await put({ enabled: true, url: model.url, dims: 0 });
+    assert.equal(ok.status, 200, ok.body);
+    assert.equal(ok.json().enabled, true);
+  });
+
+  it('catches up in the background and then searches by meaning', async () => {
+    for (let i = 0; i < 100; i++) {
+      const st = (await call(server.port, '/api/semantic')).json();
+      if (st.state === 'ready' && st.pieces > 0) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const st = (await call(server.port, '/api/semantic')).json();
+    assert.equal(st.state, 'ready');
+    assert.ok(st.sessions >= 6);
+    const r = (await call(server.port, '/api/search?q=' + encodeURIComponent('which session picked the throttle for logins'))).json();
+    assert.equal(r.meaning.used, true);
+    const top = r.hits[0];
+    assert.equal(top.session.provider, 'qwen-code', 'the rate-limiting session');
+    assert.equal(top.via, 'meaning');
+    assert.ok(Number.isInteger(top.seq));
+  });
+
+  it('turns off again', async () => {
+    const r = await put({ enabled: false, drop: true });
+    assert.equal(r.status, 200);
+    assert.deepEqual([r.json().enabled, r.json().pieces], [false, 0]);
+    assert.equal((await put({})).status, 400);
   });
 });
 

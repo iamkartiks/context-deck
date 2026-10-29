@@ -89,6 +89,20 @@ A decision is a message you marked because it settled something, in your own wor
 
 Each one stores the session id, the message's position (`seq`) and a sha256 fingerprint of the message text. `resolveDecisions()` checks the message at that position; if a re-index moved it, it finds the message again by fingerprint; if it's gone, the decision is shown as "no longer in the session" with your words intact. `decisionsForChain()` follows `handoff_from` links back from a session so briefs carry decisions from earlier sessions too.
 
+### Search by meaning (`src/semantic.ts`, `src/embedder.ts`, `src/meaning.ts`)
+
+Off unless turned on (`~/.contextdeck/config.json`); while off, no code path talks to a model.
+
+- **`embedder.ts`** talks to a model server: Ollama's `POST /api/embed` or the OpenAI `POST /v1/embeddings` (LM Studio, llama.cpp, vLLM). It refuses addresses that aren't this computer unless `allowRemote` was set from the CLI. Queries and documents are worded the way each model family expects (Qwen3's `Instruct: …\nQuery:`, EmbeddingGemma's `task: search result | query:`, nomic's `search_query:` …). Vectors are cut to `dims` numbers (Matryoshka-style models keep most of their quality) and normalised.
+- **`semantic.ts`**
+  - `catchUp()` embeds what changed, newest sessions first. Per session: the title, user and assistant messages (long ones in ~1,200-character pieces with 200 characters of overlap, at most six per message) and decisions. Tool output is left out.
+  - Pieces live in the `chunks` table as int8 vectors, pointing into `messages.text` by `(seq, start, len)` rather than copying it. A per-session signature in `embedded_sessions` skips unchanged sessions; within a changed session, only pieces whose text hash is new are embedded. Work is saved per session, so stopping is safe.
+  - Vectors from a different model or for removed sessions are pruned.
+  - `searchByMeaning()` keeps all vectors in memory (reloaded when the stored set changes) and scans them: ~0.1 s per 100k pieces in plain JS. It keeps the best piece per session.
+  - `combine()` merges word and meaning results with reciprocal rank fusion (1/(60 + rank) from each list). Meaning boosts sessions word search found. On its own it adds at most 12 sessions, and only those within 0.12 of the best score, because models score on different scales. Each hit says `via: words | meaning | both`.
+- **`meaning.ts`** wraps it for the server and CLI: one background run at a time, progress events, a live `check()`, and falling back to word search whenever the model can't be reached.
+- **Measuring quality:** `scripts/eval-meaning.mjs` builds made-up sessions and asks paraphrased, Hindi and Hinglish questions, reporting first-place and top-3 accuracy against word search.
+
 ### The UI server (`src/server.ts`)
 
 `contextdeck ui` indexes, then starts a `node:http` server on `127.0.0.1`. It serves the files in `ui/` from a fixed allow-list and a small JSON API:
@@ -97,11 +111,12 @@ Each one stores the session id, the message's position (`seq`) and a sha256 fing
 |---|---|
 | `GET /api/board` | All top-level sessions, workstreams, edges, subagent and decision counts, providers, capabilities |
 | `GET /api/session/:id[?around=<seq>]` | One session: a window of 600 messages (the latest, or around a message when jumping to a match or decision), its decisions, files, context over time, related, subagents, resume command |
-| `GET /api/search?q=` | Full-text search: per session, the best-matching message (its snippet and position) and the number of matches; plus matching decisions |
+| `GET /api/search?q=` | Search: per session, the best-matching message (its snippet and position), the number of matches and `via` (words, meaning or both); plus matching decisions and whether meaning was used |
+| `GET` / `PUT /api/semantic` | Search by meaning: status and progress; turn on (after checking the model answers; local addresses only) or off (`drop` deletes vectors) |
 | `GET /api/matches?id=&q=` | Every matching message in one session, in order, for "find in this conversation" |
 | `GET /api/decisions` | Every decision, with where it is now and a summary of its session |
 | `POST /api/decisions` · `PUT` / `DELETE /api/decisions/:id` | Mark, edit and remove decisions (stored in `decisions.json`) |
-| `GET /api/events` | Server-sent events; `index` fires whenever the watcher re-indexes, `decisions` when decisions change |
+| `GET /api/events` | Server-sent events; `index` fires whenever the watcher re-indexes, `decisions` when decisions change, `semantic` with search-by-meaning progress |
 | `GET` / `PUT /api/layout` | Hand-placed card positions, stored in `board.json` (not in the index, so rebuilding the index never loses them) |
 | `POST /api/reindex` | Rescan now |
 | `POST /api/open-terminal` | Run a session's resume command in a new terminal window (501 when none is available) |
