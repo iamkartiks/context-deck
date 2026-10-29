@@ -14,6 +14,8 @@ Before writing code, look at a few real session files from the tool:
 
 Write down what you find in the header comment of your adapter; the next contributor will thank you.
 
+If the tool is open source, read where it writes sessions instead of guessing from samples. [`src/adapters/qwen-code.ts`](../src/adapters/qwen-code.ts) was written that way, from Qwen Code's `chatRecordingService.ts`, and its header says which file each rule comes from. It's also the shortest real adapter to copy from.
+
 ## 2. Create the adapter
 
 `src/adapters/acme.ts`:

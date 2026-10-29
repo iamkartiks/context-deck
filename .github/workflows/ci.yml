@@ -35,6 +35,6 @@ jobs:
       - name: Smoke test the CLI on the fixtures
         shell: bash
         run: |
-          node bin/contextdeck.js --home .ci --claude-dir fixtures/claude --codex-dir fixtures/codex index
-          node bin/contextdeck.js --home .ci --claude-dir fixtures/claude --codex-dir fixtures/codex list
-          node bin/contextdeck.js --home .ci --claude-dir fixtures/claude --codex-dir fixtures/codex search cookie
+          node bin/contextdeck.js --home .ci --claude-dir fixtures/claude --codex-dir fixtures/codex --qwen-dir fixtures/qwen index
+          node bin/contextdeck.js --home .ci --claude-dir fixtures/claude --codex-dir fixtures/codex --qwen-dir fixtures/qwen list
+          node bin/contextdeck.js --home .ci --claude-dir fixtures/claude --codex-dir fixtures/codex --qwen-dir fixtures/qwen search cookie

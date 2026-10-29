@@ -33,6 +33,62 @@ function s(tag, attrs = {}) {
   return el;
 }
 
+const escapeRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** «match» markers from the server become <mark> elements; everything else stays text. */
+function marked(snippet) {
+  const out = [];
+  const re = /«([^»]*)»/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(snippet))) {
+    if (m.index > last) out.push(snippet.slice(last, m.index));
+    out.push(h('mark', {}, m[1]));
+    last = re.lastIndex;
+  }
+  if (last < snippet.length) out.push(snippet.slice(last));
+  return out;
+}
+
+/** The words of a search, roughly stemmed ("decided" → "decid"), for highlighting inside messages. */
+function termsOf(q) {
+  return (q.match(/"[^"]*"|\S+/g) ?? [])
+    .filter((t) => !['OR', 'AND', 'NOT'].includes(t))
+    .map((t) => t.replace(/^"|"$/g, '').replace(/\*$/, '').toLowerCase().trim())
+    .filter((t) => t.length >= 2)
+    .map((t) => (t.length > 4 && !t.includes(' ') ? t.replace(/(ing|ed|es|ion|s|e)$/, '') : t));
+}
+
+/** Text with every occurrence of the search words wrapped in <mark>. */
+function highlight(text, terms) {
+  if (!terms.length) return [text];
+  const re = new RegExp(`(?:${terms.map(escapeRe).join('|')})[\\p{L}\\p{N}]*`, 'giu');
+  const out = [];
+  let last = 0;
+  for (const m of text.matchAll(re)) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    out.push(h('mark', {}, m[0]));
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+/** Same rule as the server: every word must appear in the decision or its session's title. */
+function decisionMatches(d, q) {
+  const words = q.toLowerCase().replace(/["*]/g, ' ').split(/\s+/).filter((w) => w && !['and', 'or', 'not'].includes(w));
+  if (!words.length) return true;
+  const hay = `${d.text} ${d.session?.title ?? ''}`.toLowerCase();
+  return words.every((w) => hay.includes(w));
+}
+
+/** The decision mark: a small flag. */
+function flag() {
+  const svg = s('svg', { class: 'flag', width: 12, height: 12, viewBox: '0 0 12 12', 'aria-hidden': 'true' });
+  svg.append(s('path', { d: 'M2.5 11 V1.5 M2.5 2 H9.5 L8 4.4 L9.5 6.8 H2.5' }));
+  return svg;
+}
+
 const prefs = {
   get(key, fallback) {
     try {
@@ -173,7 +229,10 @@ const state = {
   showTools: prefs.get('showTools', false),
   selected: null,
   detail: null,
-  search: null, // { q, ids:Set, order:Map } when searching
+  search: null, // { q, ids:Set, hits:Map(sessionId → best hit), decisionHits:Map(sessionId → decisions) }
+  decisions: null, // every decision, for the Decisions view (loaded when needed)
+  meaning: null, // search by meaning: { enabled, state, model, url, api, pieces, sessions, progress, error }
+  find: null, // { q, matches:[seq], index } for "find in this conversation"
   cam: { x: 32, y: 30, k: 0.7 },
   pos: new Map(),
   groups: [],
@@ -191,6 +250,9 @@ const els = {
   cards: $('#cards'),
   empty: $('#empty'),
   list: $('#list'),
+  decisions: $('#decisions'),
+  meaningBtn: $('#meaning-btn'),
+  meaningPanel: $('#meaning-panel'),
   reader: $('#reader'),
   q: $('#q'),
   count: $('#count'),
@@ -400,28 +462,56 @@ function cardChildren(item) {
     fill.append(h('i', { style: { bottom: `${Math.round((fillPx * i) / (item.compactions + 1))}px` } }));
   }
   const helpers = state.board.subagentCounts[item.id];
+  const decided = state.board.decisionCounts?.[item.id] ?? 0;
   const age = ago(item.updatedAt);
+  const { hit, decision } = matchOf(item.id);
+  // While searching, a card shows where it matched instead of its title
+  const byMeaning = hit?.via === 'meaning';
+  const title = decision
+    ? h('span', { class: 'title snip decided' }, flag(), ' ', shortTitle(decision.text, 110))
+    : byMeaning
+      ? h('span', { class: 'title snip meaning' }, shortTitle(hit.snippet, 120))
+      : hit
+        ? h('span', { class: 'title snip' }, marked(hit.snippet))
+        : h('span', { class: 'title' }, shortTitle(item.title));
   return [
     fill,
     h(
       'span',
       { class: 'inner' },
       h('span', { class: 'top' }, swatch(item.provider), h('span', { class: `age${age === 'now' ? ' now' : ''}` }, age)),
-      h('span', { class: 'title' }, shortTitle(item.title)),
+      title,
       h(
         'span',
         { class: 'foot' },
-        helpers ? h('span', { class: 'helpers' }, `+${plural(helpers, 'subagent')}`) : null,
+        byMeaning
+          ? h('span', { class: 'helpers by-meaning', title: 'Found by meaning: no words matched' }, '≈ by meaning')
+          : hit
+            ? h('span', { class: 'helpers' }, plural(hit.hits, 'match', 'matches'))
+          : helpers
+            ? h('span', { class: 'helpers' }, `+${plural(helpers, 'subagent')}`)
+            : null,
+        decided ? h('span', { class: 'decided-count', title: plural(decided, 'decision') }, flag(), String(decided)) : null,
         ctx ? h('span', { class: 'pct' }, ctx.pct != null ? `${pctOf(ctx)}%` : tokens(ctx.tokens)) : null,
       ),
     ),
   ];
 }
 
+/** Where a session matched the current search: its best message, and any matching decision. */
+function matchOf(id) {
+  if (!state.search) return { hit: null, decision: null };
+  return { hit: state.search.hits?.get(id) ?? null, decision: state.search.decisionHits?.get(id)?.[0] ?? null };
+}
+
 function cardLabel(item) {
   const ctx = contextOf(item);
+  const { hit, decision } = matchOf(item.id);
+  const decided = state.board.decisionCounts?.[item.id] ?? 0;
   return [
     item.title,
+    decision ? `Matching decision: ${decision.text}` : hit ? `${hit.via === 'meaning' ? 'Found by meaning' : 'Matches'}: ${hit.snippet.replace(/[«»]/g, '')}` : '',
+    decided ? plural(decided, 'decision') : '',
     `${toolLabel(item.provider)}, ${item.project ?? 'no project'}`,
     `updated ${agoLong(item.updatedAt)}`,
     ctx?.pct != null ? `context ${pctOf(ctx)}% full${item.compactions ? `, compacted ${times(item.compactions)}` : ''}` : '',
@@ -437,7 +527,7 @@ function renderCanvas() {
     for (const item of g.items) {
       seen.add(item.id);
       let el = cardEls.get(item.id);
-      const sig = `${item.updatedAt}|${item.title}|${item.contextTokens}|${item.compactions}|${state.board.subagentCounts[item.id] ?? 0}`;
+      const sig = `${item.updatedAt}|${item.title}|${item.contextTokens}|${item.compactions}|${state.board.subagentCounts[item.id] ?? 0}|${state.board.decisionCounts?.[item.id] ?? 0}|${state.search?.q ?? ''}`;
       if (!el) {
         el = h('button', { type: 'button', class: 'card', dataset: { id: item.id, tool: item.provider } });
         attachCardEvents(el);
@@ -764,6 +854,8 @@ function renderList() {
   for (const g of groups) {
     const rows = g.items.map((item) => {
       const ctx = contextOf(item);
+      const { hit, decision } = matchOf(item.id);
+      const decided = state.board.decisionCounts?.[item.id] ?? 0;
       return h(
         'button',
         {
@@ -774,7 +866,23 @@ function renderList() {
           onclick: () => select(item.id),
         },
         swatch(item.provider),
-        h('span', { class: 'r-title', title: item.title }, item.title),
+        h(
+          'span',
+          { class: 'r-main' },
+          h(
+            'span',
+            { class: 'r-title', title: item.title },
+            decided ? h('span', { class: 'decided-count', title: plural(decided, 'decision') }, flag(), String(decided)) : null,
+            item.title,
+          ),
+          decision
+            ? h('span', { class: 'r-snip decided' }, flag(), ' ', decision.text)
+            : hit?.via === 'meaning'
+              ? h('span', { class: 'r-snip meaning' }, h('span', { class: 'r-hits' }, '≈ by meaning · '), hit.snippet)
+              : hit
+                ? h('span', { class: 'r-snip' }, marked(hit.snippet), h('span', { class: 'r-hits' }, ` · ${plural(hit.hits, 'match', 'matches')}`))
+                : null,
+        ),
         h('span', { class: 'r-where' }, [item.project ?? 'no project', item.gitBranch].filter(Boolean).join(' · ')),
         h(
           'span',
@@ -801,6 +909,226 @@ function renderList() {
   els.list.replaceChildren(inner);
 }
 
+// ── Decisions view ────────────────────────────────────────────────────────
+
+let decisionsLoading = null;
+
+function renderDecisions() {
+  if (!state.decisions) {
+    if (!decisionsLoading) {
+      decisionsLoading = api('/api/decisions')
+        .then((r) => {
+          state.decisions = r.decisions;
+          if (state.view === 'decisions') renderDecisions();
+        })
+        .catch((err) => toast(err.message))
+        .finally(() => (decisionsLoading = null));
+    }
+    if (!els.decisions.childElementCount) els.decisions.replaceChildren(h('div', { class: 'list-inner' }, h('p', { class: 'note' }, 'Loading decisions…')));
+    return;
+  }
+  const q = state.search?.q ?? '';
+  const shown = state.decisions.filter((d) => !state.hiddenTools.has(d.session?.provider) && (!q || decisionMatches(d, q)));
+  const inner = h('div', { class: 'list-inner' });
+  if (!state.decisions.length) {
+    inner.append(
+      h(
+        'div',
+        { class: 'empty interactive' },
+        h('h2', {}, 'No decisions yet'),
+        h(
+          'p',
+          {},
+          'Open a session and choose ',
+          h('strong', {}, 'Mark as decision'),
+          ' on the message that settled something. Select part of a message first to quote just that. Decisions show up here, on cards, in search, and in every handoff brief, so the next session doesn’t reopen them.',
+        ),
+      ),
+    );
+  } else if (!shown.length) {
+    inner.append(h('div', { class: 'empty interactive' }, h('h2', {}, 'No decisions match'), h('p', {}, 'Try another word, or turn a tool back on.')));
+  } else {
+    // Group by project, newest decision first
+    const groups = new Map();
+    for (const d of shown) {
+      const key = d.session?.project ?? 'No project';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(d);
+    }
+    for (const [project, items] of groups) {
+      inner.append(
+        h(
+          'section',
+          { class: 'list-group' },
+          h('div', { class: 'list-head' }, h('h2', {}, project), h('span', { class: 'meta' }, plural(items.length, 'decision'))),
+          h('ul', { class: 'decision-grid' }, items.map((d) => h('li', {}, decisionCard(d)))),
+        ),
+      );
+    }
+  }
+  els.decisions.replaceChildren(inner);
+}
+
+// ── Search by meaning ─────────────────────────────────────────────────────
+
+const MEANING_MODELS = [
+  ['qwen3-embedding:0.6b', 'many languages and code (recommended)'],
+  ['bge-m3', 'many languages'],
+  ['embeddinggemma', 'English, small'],
+  ['nomic-embed-text', 'English, small'],
+];
+
+function meaningLabel(m) {
+  if (!m?.enabled) return 'off';
+  if (m.state === 'catching-up') return m.progress?.sessionsTotal ? `catching up, ${m.progress.sessionsDone} of ${m.progress.sessionsTotal} sessions` : 'catching up';
+  if (m.state === 'error') return 'can’t reach the model';
+  return 'on';
+}
+
+function renderMeaningButton() {
+  const m = state.meaning;
+  const b = els.meaningBtn;
+  b.classList.toggle('on', !!m?.enabled);
+  b.classList.toggle('busy', m?.state === 'catching-up');
+  b.classList.toggle('problem', m?.state === 'error');
+  const label = `Search by meaning: ${meaningLabel(m)}`;
+  b.setAttribute('aria-label', label);
+  b.title = label;
+}
+
+function setMeaningPanel(open) {
+  els.meaningPanel.hidden = !open;
+  els.meaningBtn.setAttribute('aria-expanded', String(open));
+  if (open) {
+    renderMeaningPanel();
+    $('input, button', els.meaningPanel)?.focus();
+  }
+}
+
+function renderMeaningPanel() {
+  if (els.meaningPanel.hidden) return;
+  const m = state.meaning ?? { enabled: false, api: 'ollama', url: 'http://127.0.0.1:11434', model: 'qwen3-embedding:0.6b' };
+  const alert = h('p', { class: 'warn', role: 'alert', hidden: true });
+  const fail = (err) => {
+    alert.textContent = err.message;
+    alert.hidden = false;
+  };
+  const head = [
+    h('div', { class: 'mp-head' }, h('h2', {}, 'Search by meaning'), h('span', { class: `mp-state ${m.enabled ? m.state : 'off'}` }, meaningLabel(m))),
+    h(
+      'p',
+      { class: 'mp-lead' },
+      'Finds sessions by what they’re about, not only the words in them: “which chat decided on the database” finds “let’s go with Postgres”. It uses an embedding model running on your computer, so nothing leaves it.',
+    ),
+  ];
+
+  if (!m.enabled || m.state === 'error') {
+    const model = h('input', { type: 'text', class: 'mp-input', list: 'mp-models', value: m.model, spellcheck: 'false', autocomplete: 'off', 'aria-label': 'Model' });
+    const url = h('input', { type: 'url', class: 'mp-input', value: m.url, spellcheck: 'false', autocomplete: 'off', 'aria-label': 'Model server address' });
+    const kind = h(
+      'select',
+      { class: 'mp-input', 'aria-label': 'Kind of server' },
+      h('option', { value: 'ollama', selected: m.api === 'ollama' }, 'Ollama'),
+      h('option', { value: 'openai', selected: m.api === 'openai' }, 'OpenAI-compatible (LM Studio, llama.cpp, vLLM)'),
+    );
+    kind.addEventListener('change', () => {
+      // Swap the default address along with the kind, unless it was changed by hand
+      if (url.value === 'http://127.0.0.1:11434' || url.value === 'http://127.0.0.1:1234') url.value = kind.value === 'ollama' ? 'http://127.0.0.1:11434' : 'http://127.0.0.1:1234';
+    });
+    const pull = h('code', {}, `ollama pull ${m.model}`);
+    model.addEventListener('input', () => (pull.textContent = `ollama pull ${model.value.trim() || 'qwen3-embedding:0.6b'}`));
+    const go = h('button', { type: 'submit', class: 'pill solid' }, m.state === 'error' ? 'Try again' : 'Check and turn on');
+    const form = h(
+      'form',
+      {
+        class: 'mp-form',
+        onsubmit: async (e) => {
+          e.preventDefault();
+          alert.hidden = true;
+          go.disabled = true;
+          go.textContent = 'Checking the model…';
+          try {
+            state.meaning = await api('/api/semantic', { method: 'PUT', body: { enabled: true, model: model.value.trim(), url: url.value.trim(), api: kind.value } });
+            renderMeaningButton();
+            renderMeaningPanel();
+            toast('Search by meaning is on. Your sessions are being embedded in the background.');
+          } catch (err) {
+            go.disabled = false;
+            go.textContent = 'Check and turn on';
+            fail(err);
+          }
+        },
+      },
+      h('ol', { class: 'mp-steps' },
+        h('li', {}, 'Install ', h('a', { href: 'https://ollama.com', target: '_blank', rel: 'noopener noreferrer' }, 'Ollama'), ' (or LM Studio, llama.cpp, vLLM).'),
+        h('li', {}, 'Get an embedding model: ', pull, h('button', { type: 'button', class: 'text-button', onclick: async (e) => {
+          try {
+            await navigator.clipboard.writeText(pull.textContent);
+            e.currentTarget.textContent = 'Copied';
+          } catch {
+            toast('Copy didn’t work here; select the command instead.');
+          }
+        } }, 'Copy')),
+        h('li', {}, 'Check it answers, and turn this on.'),
+      ),
+      h('label', { class: 'mp-field' }, h('span', {}, 'Model'), model),
+      h('datalist', { id: 'mp-models' }, MEANING_MODELS.map(([v, note]) => h('option', { value: v }, note))),
+      h('p', { class: 'note' }, 'For prompts in more than one language (Hindi and English, say), use qwen3-embedding or bge-m3. For English only, embeddinggemma is smaller.'),
+      h('label', { class: 'mp-field' }, h('span', {}, 'Server'), url),
+      h('label', { class: 'mp-field' }, h('span', {}, 'Kind'), kind),
+      m.state === 'error' && m.error ? h('p', { class: 'warn' }, m.error) : null,
+      alert,
+      h('div', { class: 'actions' }, go, m.enabled ? h('button', { type: 'button', class: 'text-button', onclick: () => turnOff(false) }, 'Turn off') : null),
+    );
+    els.meaningPanel.replaceChildren(...head, form);
+    return;
+  }
+
+  const p = m.progress;
+  const pct = p?.sessionsTotal ? Math.round((p.sessionsDone / p.sessionsTotal) * 100) : null;
+  els.meaningPanel.replaceChildren(
+    ...head,
+    h(
+      'dl',
+      { class: 'mp-facts' },
+      h('dt', {}, 'Model'), h('dd', {}, m.model),
+      h('dt', {}, 'Server'), h('dd', {}, m.url),
+      h('dt', {}, 'Covered'), h('dd', {}, `${plural(m.sessions, 'session')}, ${plural(m.pieces, 'piece')} of text`),
+    ),
+    m.state === 'catching-up'
+      ? h(
+          'div',
+          { class: 'mp-progress' },
+          h('div', { class: 'bar-big' }, h('span', { style: { width: `${pct ?? 0}%` } })),
+          h('p', { class: 'note' }, p?.sessionsTotal ? `Embedding ${p.sessionsDone} of ${p.sessionsTotal} sessions, newest first. Search already uses what’s done.` : 'Getting started…'),
+        )
+      : h('p', { class: 'note' }, 'New and changed sessions are embedded as they come in. Results found this way are marked “≈ by meaning”.'),
+    alert,
+    h(
+      'div',
+      { class: 'actions' },
+      h('button', { type: 'button', class: 'pill outline small', onclick: () => turnOff(false) }, 'Turn off'),
+      h('button', { type: 'button', class: 'text-button', onclick: () => turnOff(true), title: 'Also delete the stored vectors' }, 'Turn off and delete vectors'),
+    ),
+  );
+
+  async function turnOff(drop) {
+    try {
+      state.meaning = await api('/api/semantic', { method: 'PUT', body: { enabled: false, drop } });
+      renderMeaningButton();
+      renderMeaningPanel();
+      if (state.search) runSearch();
+    } catch (err) {
+      fail(err);
+    }
+  }
+}
+
+els.meaningBtn.addEventListener('click', () => setMeaningPanel(els.meaningPanel.hidden));
+document.addEventListener('pointerdown', (e) => {
+  if (!els.meaningPanel.hidden && !e.target.closest('.search-wrap')) setMeaningPanel(false);
+});
+
 // ── Search ────────────────────────────────────────────────────────────────
 
 let searchTimer = 0;
@@ -814,13 +1142,19 @@ async function runSearch() {
   const q = els.q.value.trim();
   if (!q) return clearSearch(false);
   const seq = ++searchSeq;
-  let ids = new Set();
+  const hits = new Map();
+  const decisionHits = new Map();
   try {
-    const { hits } = await api(`/api/search?q=${encodeURIComponent(q)}`);
-    ids = new Set(hits.map((x) => x.session.id));
+    const res = await api(`/api/search?q=${encodeURIComponent(q)}`);
+    for (const x of res.hits) hits.set(x.session.id, x);
+    for (const d of res.decisions ?? []) {
+      if (!decisionHits.has(d.sessionId)) decisionHits.set(d.sessionId, []);
+      decisionHits.get(d.sessionId).push(d);
+    }
   } catch {
     /* an unparseable query just matches nothing */
   }
+  const ids = new Set([...hits.keys(), ...decisionHits.keys()]);
   if (seq !== searchSeq) return;
   // Also match titles, projects, branches and group names, so typing what you see always works
   const needle = q.toLowerCase();
@@ -830,7 +1164,7 @@ async function runSearch() {
     const hay = `${x.title} ${x.project ?? ''} ${x.gitBranch ?? ''} ${wsName.get(x.id) ?? ''}`.toLowerCase();
     if (hay.includes(needle)) ids.add(x.id);
   }
-  state.search = { q, ids };
+  state.search = { q, ids, hits, decisionHits };
   relayout();
   if (state.view === 'canvas') fit();
 }
@@ -849,7 +1183,12 @@ function clearSearch(clearInput = true) {
 let detailSeq = 0;
 let returnFocus = null;
 
-async function select(id, { focusReader = true } = {}) {
+/**
+ * Open a session in the side panel. `seq` jumps to that message (a search
+ * match or a decision); while searching, the best match is used. `keepPlace`
+ * refreshes an open panel without moving it (live updates).
+ */
+async function select(id, { focusReader = true, seq: target = null, keepPlace = false } = {}) {
   const changed = state.selected !== id;
   state.selected = id;
   if (changed) returnFocus = document.activeElement;
@@ -859,21 +1198,343 @@ async function select(id, { focusReader = true } = {}) {
     /* ignore */
   }
   render();
+  if (target == null && changed) target = searchTarget(id);
+  const around = target ?? (keepPlace && !changed ? middleOfWindow() : null);
+  const scroll = els.reader.scrollTop;
   const seq = ++detailSeq;
   try {
-    const detail = await api(`/api/session/${encodeURIComponent(id)}`);
+    const detail = await api(`/api/session/${encodeURIComponent(id)}${around != null ? `?around=${around}` : ''}`);
     if (seq !== detailSeq) return;
     state.detail = detail;
-    renderReader();
+    if (changed) state.find = state.search ? { q: state.search.q, matches: null, index: -1 } : null;
+    renderReader({ keepScroll: keepPlace && !changed ? scroll : null });
     if (focusReader && changed) els.reader.focus({ preventScroll: true });
+    if (state.find?.q && !state.find.matches) await loadFind(state.find.q, target);
+    else paintFind();
+    if (target != null) jumpTo(target, { load: false });
   } catch (err) {
     if (seq === detailSeq) toast(err.message);
   }
 }
 
+/** The message to open a session at while searching: a matching decision, else the best match. */
+function searchTarget(id) {
+  const { hit, decision } = matchOf(id);
+  // A session found through its title has no message to jump to (seq -1)
+  return decision?.seq ?? (hit && hit.seq >= 0 ? hit.seq : null);
+}
+
+/** For long sessions showing an older window: keep showing that window on refresh. */
+function middleOfWindow() {
+  const d = state.detail;
+  if (!d?.truncatedAfter) return null;
+  return d.messages[Math.floor(d.messages.length / 2)]?.seq ?? null;
+}
+
+// ── Find in this conversation ─────────────────────────────────────────────
+
+let findTimer = 0;
+let findRun = 0;
+
+async function loadFind(q, target = null) {
+  const id = state.selected;
+  const run = ++findRun;
+  if (!q) {
+    state.find = null;
+    paintFind();
+    return;
+  }
+  state.find = { q, matches: null, index: -1 };
+  updateFindCount();
+  let matches = [];
+  try {
+    matches = (await api(`/api/matches?id=${encodeURIComponent(id)}&q=${encodeURIComponent(q)}`)).matches.map((x) => x.seq);
+  } catch {
+    /* an unparseable query just matches nothing */
+  }
+  if (run !== findRun || state.selected !== id) return;
+  let index = matches.length ? 0 : -1;
+  if (target != null && matches.length) {
+    const i = matches.findIndex((x) => x >= target);
+    index = i < 0 ? matches.length - 1 : i;
+  }
+  state.find = { q, matches, index };
+  paintFind();
+  if (target == null && index >= 0) await jumpTo(matches[index]);
+}
+
+async function stepFind(dir) {
+  const f = state.find;
+  if (!f?.matches?.length) return;
+  f.index = (f.index + dir + f.matches.length) % f.matches.length;
+  updateFindCount();
+  await jumpTo(f.matches[f.index]);
+}
+
+function updateFindCount() {
+  const el = $('.find-count', els.reader);
+  if (!el) return;
+  const f = state.find;
+  if (!f?.q) el.textContent = '';
+  else if (!f.matches) el.textContent = 'Searching…';
+  else if (f.matches.length) el.textContent = `${f.index + 1} of ${f.matches.length}`;
+  else {
+    // The session can match through one of its decisions rather than a message
+    const n = (state.detail?.decisions ?? []).filter((d) => decisionMatches(d, f.q)).length;
+    const byMeaning = state.search?.q === f.q && state.search.hits?.get(state.selected)?.via === 'meaning';
+    el.textContent = n ? (n === 1 ? 'In a decision' : `In ${n} decisions`) : byMeaning ? 'Matched by meaning' : 'No matches';
+  }
+}
+
+/** Mark and highlight the matching messages that are on screen. */
+function paintFind() {
+  const d = state.detail;
+  if (!d) return;
+  const terms = state.find?.q ? termsOf(state.find.q) : [];
+  const hits = new Set(state.find?.matches ?? []);
+  const bySeq = new Map(d.messages.map((m) => [m.seq, m]));
+  for (const el of els.reader.querySelectorAll('.msg[data-seq]')) {
+    const seq = Number(el.dataset.seq);
+    const isHit = hits.has(seq);
+    if (!isHit && !el.classList.contains('hit')) continue;
+    el.classList.toggle('hit', isHit);
+    const m = bySeq.get(seq);
+    const body = $(':scope > .body', el);
+    if (m && body) body.replaceChildren(...bodyOf(m, isHit ? terms : []));
+  }
+  updateFindCount();
+}
+
+/** Scroll to a message, loading the part of a long session it's in if needed. */
+async function jumpTo(seq, { load = true } = {}) {
+  let el = $(`.msg[data-seq="${seq}"]`, els.reader);
+  if (!el && load && state.selected) {
+    const id = state.selected;
+    const run = ++detailSeq;
+    try {
+      const detail = await api(`/api/session/${encodeURIComponent(id)}?around=${seq}`);
+      if (run !== detailSeq) return;
+      state.detail = detail;
+      renderReader({ keepScroll: els.reader.scrollTop });
+      paintFind();
+    } catch (err) {
+      toast(err.message);
+      return;
+    }
+    el = $(`.msg[data-seq="${seq}"]`, els.reader);
+  }
+  if (!el) return;
+  for (const x of els.reader.querySelectorAll('.msg.current')) x.classList.remove('current');
+  el.classList.add('current');
+  el.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+}
+
+// ── Decisions ─────────────────────────────────────────────────────────────
+
+let pendingSelection = '';
+
+/** Text selected inside one message, if any. */
+function selectionIn(body) {
+  const sel = getSelection();
+  if (!sel || sel.isCollapsed || !body.contains(sel.anchorNode) || !body.contains(sel.focusNode)) return '';
+  return sel.toString().trim();
+}
+
+/** A starting point for the decision text: the message's first sentences. */
+function firstWords(text, max = 280) {
+  const t = text.replace(/```[\s\S]*?```/g, ' ').replace(/\s+/g, ' ').trim();
+  if (t.length <= max) return t;
+  const cut = t.slice(0, max);
+  const end = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '));
+  return end > 80 ? cut.slice(0, end + 1) : `${cut.replace(/\s+\S*$/, '')}…`;
+}
+
+function openDecideForm(msgEl, m, body) {
+  const quote = pendingSelection || selectionIn(body);
+  pendingSelection = '';
+  for (const f of els.reader.querySelectorAll('.decide-form')) f.remove();
+  const ta = h('textarea', { class: 'decide-text', rows: 3, maxlength: 2000, 'aria-label': 'The decision' });
+  ta.value = quote || firstWords(m.text);
+  const cancel = () => {
+    form.remove();
+    $('.mark-btn', msgEl)?.focus();
+  };
+  const save = h('button', { type: 'submit', class: 'pill solid' }, 'Save decision');
+  const form = h(
+    'form',
+    {
+      class: 'decide-form',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        const text = ta.value.trim();
+        if (!text) {
+          toast('Write the decision first.');
+          ta.focus();
+          return;
+        }
+        save.disabled = true;
+        try {
+          const created = await api('/api/decisions', { method: 'POST', body: { sessionId: state.detail.session.id, seq: m.seq, text } });
+          afterDecisionChange({ added: created });
+          toast('Marked as a decision.');
+        } catch (err) {
+          save.disabled = false;
+          toast(err.message);
+        }
+      },
+      onkeydown: (e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+          cancel();
+        } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+          e.preventDefault();
+          form.requestSubmit();
+        }
+      },
+    },
+    h('div', { class: 'label' }, 'Decision'),
+    ta,
+    h(
+      'p',
+      { class: 'note' },
+      quote
+        ? 'Quoted from your selection. Edit it so it reads well on its own.'
+        : 'Write it the way you’d want to find it later, e.g. “Use Postgres: SQLite can’t take concurrent writes.” Tip: select part of a message first to quote just that.',
+    ),
+    h('div', { class: 'actions' }, save, h('button', { type: 'button', class: 'text-button', onclick: cancel }, 'Cancel')),
+  );
+  msgEl.after(form);
+  ta.focus();
+  ta.select();
+}
+
+function editDecision(card, textEl, x) {
+  const ta = h('textarea', { class: 'decide-text', rows: 3, maxlength: 2000, 'aria-label': 'The decision' });
+  ta.value = x.text;
+  const done = () => form.replaceWith(textEl);
+  const form = h(
+    'form',
+    {
+      class: 'decide-form inline',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        try {
+          const updated = await api(`/api/decisions/${encodeURIComponent(x.id)}`, { method: 'PUT', body: { text: ta.value } });
+          afterDecisionChange({ updated });
+        } catch (err) {
+          toast(err.message);
+        }
+      },
+      onkeydown: (e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+          done();
+        } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+          e.preventDefault();
+          form.requestSubmit();
+        }
+      },
+    },
+    ta,
+    h('div', { class: 'actions' }, h('button', { type: 'submit', class: 'pill solid' }, 'Save'), h('button', { type: 'button', class: 'text-button', onclick: done }, 'Cancel')),
+  );
+  textEl.replaceWith(form);
+  ta.focus();
+}
+
+/** Remove needs a second click within a few seconds, instead of a dialog. */
+function removeButton(x) {
+  let armed = false;
+  let timer = 0;
+  const btn = h(
+    'button',
+    {
+      type: 'button',
+      class: 'text-button danger',
+      onclick: async () => {
+        if (!armed) {
+          armed = true;
+          btn.textContent = 'Click again to remove';
+          timer = setTimeout(() => {
+            armed = false;
+            btn.textContent = 'Remove';
+          }, 3000);
+          return;
+        }
+        clearTimeout(timer);
+        try {
+          await api(`/api/decisions/${encodeURIComponent(x.id)}`, { method: 'DELETE' });
+          afterDecisionChange({ removed: x });
+          toast('Decision removed.');
+        } catch (err) {
+          toast(err.message);
+        }
+      },
+    },
+    'Remove',
+  );
+  return btn;
+}
+
+function decisionCard(x, { inReader = false } = {}) {
+  const textEl = h('p', { class: 'd-text' }, x.text);
+  const open = () => select(x.sessionId, { seq: x.seq });
+  const card = h(
+    'div',
+    { class: 'decision', dataset: { tool: x.session?.provider ?? '' } },
+    h('div', { class: 'd-top' }, flag(), h('span', { class: 'd-when', title: fullDate(x.createdAt) }, `Decided ${agoLong(x.createdAt)}`)),
+    textEl,
+    !inReader && x.session
+      ? h('div', { class: 'd-session' }, swatch(x.session.provider), h('span', { class: 'd-tool' }, toolLabel(x.session.provider)), h('span', { class: 'd-title', title: x.session.title }, x.session.title))
+      : null,
+    x.anchored ? null : h('p', { class: 'note' }, 'The message it came from is no longer in the session file. Your words are kept.'),
+    h(
+      'div',
+      { class: 'd-actions' },
+      inReader
+        ? x.anchored
+          ? h('button', { type: 'button', class: 'text-button', onclick: () => jumpTo(x.seq) }, 'Show in conversation')
+          : null
+        : x.session
+          ? h(
+              'button',
+              { type: 'button', class: 'pill outline small', title: x.anchored ? 'Open the session at the message where this was decided' : 'Open the session', onclick: open },
+              'Open',
+            )
+          : null,
+      h('button', { type: 'button', class: 'text-button', onclick: () => editDecision(card, textEl, x) }, 'Edit'),
+      removeButton(x),
+    ),
+  );
+  return card;
+}
+
+/** Keep every view in step after adding, editing or removing a decision. */
+function afterDecisionChange({ added, updated, removed }) {
+  const changed = added ?? updated ?? removed;
+  const sid = changed.sessionId;
+  const counts = (state.board.decisionCounts ??= {});
+  if (added) counts[sid] = (counts[sid] ?? 0) + 1;
+  if (removed) counts[sid] = Math.max(0, (counts[sid] ?? 1) - 1);
+  const merge = (list) => {
+    const rest = list.filter((d) => d.id !== changed.id);
+    return removed ? rest : [...rest, { ...(list.find((d) => d.id === changed.id) ?? {}), ...changed }];
+  };
+  if (state.decisions) state.decisions = merge(state.decisions).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  if (state.detail?.session.id === sid) {
+    state.detail.decisions = merge(state.detail.decisions ?? []).sort((a, b) => a.seq - b.seq);
+    renderReader({ keepScroll: els.reader.scrollTop });
+    paintFind();
+  }
+  render();
+}
+
 function closeReader() {
   state.selected = null;
   state.detail = null;
+  state.find = null;
   detailSeq++;
   els.reader.hidden = true;
   try {
@@ -885,18 +1546,51 @@ function closeReader() {
   if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
 }
 
-function messageBody(text) {
+function messageBody(text, terms = []) {
   const parts = [];
   const re = /```[^\n]*\n?([\s\S]*?)```/g;
   let last = 0;
   let m;
   while ((m = re.exec(text))) {
-    if (m.index > last) parts.push(text.slice(last, m.index));
-    parts.push(h('pre', {}, m[1].replace(/\n$/, '')));
+    if (m.index > last) parts.push(highlight(text.slice(last, m.index), terms));
+    parts.push(h('pre', {}, highlight(m[1].replace(/\n$/, ''), terms)));
     last = re.lastIndex;
   }
-  if (last < text.length) parts.push(text.slice(last));
-  return parts;
+  if (last < text.length) parts.push(highlight(text.slice(last), terms));
+  return parts.flat();
+}
+
+function bodyOf(m, terms = []) {
+  return m.role === 'tool' ? highlight(m.text, terms) : messageBody(m.text, terms);
+}
+
+function messageEl(m, toolName, decisions) {
+  const body = h('div', { class: 'body' }, bodyOf(m));
+  const el = h(
+    'div',
+    { class: `msg ${m.role}${decisions?.length ? ' decided' : ''}`, dataset: { seq: String(m.seq) } },
+    h(
+      'div',
+      { class: 'who' },
+      m.role === 'user' ? 'You' : m.role === 'assistant' ? toolName : m.toolName ?? 'Tool',
+      m.ts ? h('time', { datetime: m.ts, title: fullDate(m.ts) }, ago(m.ts)) : null,
+      h(
+        'button',
+        {
+          type: 'button',
+          class: 'mark-btn',
+          title: 'Mark this message as a decision. Select part of it first to quote just that.',
+          onpointerdown: () => (pendingSelection = selectionIn(body)),
+          onclick: () => openDecideForm(el, m, body),
+        },
+        flag(),
+        'Mark as decision',
+      ),
+    ),
+    decisions?.map((x) => h('div', { class: 'decision-callout' }, flag(), h('span', {}, x.text))),
+    body,
+  );
+  return el;
 }
 
 /** Context over the session from the real per-turn token counts. */
@@ -949,8 +1643,10 @@ function linkCard(sess, why) {
   );
 }
 
-function renderReader() {
+function renderReader({ keepScroll = null } = {}) {
   const d = state.detail;
+  // Typing in the find box shouldn't lose focus when a jump reloads the panel
+  const findFocus = document.activeElement?.classList?.contains('find-input') ? document.activeElement.selectionStart : null;
   if (!d) {
     els.reader.hidden = true;
     return;
@@ -1086,23 +1782,67 @@ function renderReader() {
     ),
   );
 
-  const convo = h(
+  const decidedAt = new Map();
+  for (const x of d.decisions ?? []) {
+    if (!x.anchored) continue;
+    if (!decidedAt.has(x.seq)) decidedAt.set(x.seq, []);
+    decidedAt.get(x.seq).push(x);
+  }
+  const convo = h('div', { class: `convo${state.showTools ? '' : ' hide-tools'}` }, d.messages.map((m) => messageEl(m, tool, decidedAt.get(m.seq))));
+
+  const decisions = d.decisions?.length
+    ? h(
+        'section',
+        { class: 'section' },
+        h('div', { class: 'label' }, `Decisions · ${d.decisions.length}`),
+        h('ul', { class: 'decision-list' }, d.decisions.map((x) => h('li', {}, decisionCard(x, { inReader: true })))),
+      )
+    : null;
+
+  const find = h(
     'div',
-    { class: `convo${state.showTools ? '' : ' hide-tools'}` },
-    d.messages.map((m) =>
-      h(
-        'div',
-        { class: `msg ${m.role}` },
-        h(
-          'div',
-          { class: 'who' },
-          m.role === 'user' ? 'You' : m.role === 'assistant' ? tool : m.toolName ?? 'Tool',
-          m.ts ? h('time', { datetime: m.ts, title: fullDate(m.ts) }, ago(m.ts)) : null,
-        ),
-        h('div', { class: 'body' }, m.role === 'tool' ? m.text : messageBody(m.text)),
-      ),
-    ),
+    { class: 'find' },
+    h('input', {
+      type: 'search',
+      class: 'find-input',
+      placeholder: 'Find in this conversation',
+      'aria-label': 'Find in this conversation',
+      autocomplete: 'off',
+      spellcheck: 'false',
+      value: state.find?.q ?? '',
+      oninput: (e) => {
+        clearTimeout(findTimer);
+        const q = e.target.value.trim();
+        findTimer = setTimeout(() => loadFind(q), 200);
+      },
+      onkeydown: (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          stepFind(e.shiftKey ? -1 : 1);
+        } else if (e.key === 'Escape' && e.target.value) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.target.value = '';
+          loadFind('');
+        }
+      },
+    }),
+    h('span', { class: 'find-count', 'aria-live': 'polite' }),
+    h('button', { type: 'button', class: 'round small', 'aria-label': 'Previous match', title: 'Previous match (Shift+Enter)', onclick: () => stepFind(-1) }, '↑'),
+    h('button', { type: 'button', class: 'round small', 'aria-label': 'Next match', title: 'Next match (Enter)', onclick: () => stepFind(1) }, '↓'),
   );
+
+  const total = d.truncatedMessages + d.messages.length + (d.truncatedAfter ?? 0);
+  const windowNote =
+    d.truncatedMessages || d.truncatedAfter
+      ? h(
+          'p',
+          { class: 'note window-note' },
+          `Showing messages ${d.truncatedMessages + 1}–${d.truncatedMessages + d.messages.length} of ${total}. `,
+          d.truncatedMessages ? h('button', { type: 'button', class: 'text-button', onclick: () => jumpTo(Math.max(0, d.messages[0].seq - 1)) }, 'Earlier') : null,
+          d.truncatedAfter ? h('button', { type: 'button', class: 'text-button', onclick: () => jumpTo(d.messages[d.messages.length - 1].seq + 1) }, 'Later') : null,
+        )
+      : null;
 
   els.reader.replaceChildren(
     h('div', { class: 'reader-glow', 'aria-hidden': 'true' }),
@@ -1125,6 +1865,7 @@ function renderReader() {
       ),
       h('h2', { id: 'reader-title' }, sess.title),
       resume,
+      decisions,
       handoff,
       context,
       h('dl', { class: 'facts' }, facts.flatMap(([k, v]) => [h('dt', {}, k), h('dd', { title: k === 'Id' ? sess.id : null }, v)])),
@@ -1162,18 +1903,27 @@ function renderReader() {
             'Tool calls',
           ),
         ),
-        d.truncatedMessages ? h('p', { class: 'note' }, `Showing the last ${d.messages.length} messages.`) : null,
+        d.messages.length ? find : null,
+        windowNote,
         d.messages.length ? convo : h('p', { class: 'note' }, 'No messages were recorded for this session.'),
       ),
     ),
   );
   els.reader.hidden = false;
-  els.reader.scrollTop = 0;
+  els.reader.scrollTop = keepScroll ?? 0;
+  updateFindCount();
+  if (findFocus != null) {
+    const input = $('.find-input', els.reader);
+    input?.focus({ preventScroll: true });
+    input?.setSelectionRange(findFocus, findFocus);
+  }
 }
 
 // ── Handoff composer ─────────────────────────────────────────────────────
 
 const COMPANY = { 'claude-code': 'Anthropic', codex: 'OpenAI' };
+// Where a brief goes for tools that can run any model
+const MODEL_DEPENDENT = new Set(['qwen-code']);
 // Step 3 of the brief, in its two forms (must match src/handoff.ts)
 const CHECK_IN_STEP = '3. Then reply with a short summary of where things stand and the next step you propose, and wait for my go-ahead before changing any files.';
 const CARRY_ON_STEP = '3. Then carry on with the next step.';
@@ -1285,9 +2035,11 @@ function renderComposer(text) {
   const cmd = h('code', { class: 'composer-cmd', hidden: true });
 
   const notes = [
-    p.crossProvider
-      ? h('p', { class: 'note' }, `Starting it sends this brief to ${COMPANY[p.to] ?? p.toLabel} (${p.toLabel}). Secrets were removed when the session was indexed, but read it through first.`)
-      : null,
+    p.crossProvider && MODEL_DEPENDENT.has(p.to)
+      ? h('p', { class: 'note' }, `Starting it sends this brief to the model ${p.toLabel} is set up to use. With a local model it stays on this computer; otherwise it goes to that model’s provider. Secrets were removed when the session was indexed, but read it through first.`)
+      : p.crossProvider
+        ? h('p', { class: 'note' }, `Starting it sends this brief to ${COMPANY[p.to] ?? p.toLabel} (${p.toLabel}). Secrets were removed when the session was indexed, but read it through first.`)
+        : null,
     p.cwd && !p.cwdExists
       ? h('p', { class: 'warn' }, `The project folder ${p.cwd} isn’t on this computer any more, so the new session will start in your home folder.`)
       : null,
@@ -1413,7 +2165,7 @@ function renderHeader() {
           },
         },
         swatch(p.id),
-        p.label,
+        h('span', { class: 'chip-label' }, p.label),
         h('span', { class: 'n' }, String(counts.get(p.id) ?? 0)),
       );
     }),
@@ -1475,6 +2227,10 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape') {
     if (composer) return closeComposer();
+    if (!els.meaningPanel.hidden) {
+      setMeaningPanel(false);
+      return els.meaningBtn.focus();
+    }
     if (e.target === els.q && els.q.value) return clearSearch();
     if (state.selected) return closeReader();
     if (state.search) return clearSearch();
@@ -1499,8 +2255,10 @@ function render() {
   renderHeader();
   els.board.hidden = state.view !== 'canvas';
   els.list.hidden = state.view !== 'list';
+  els.decisions.hidden = state.view !== 'decisions';
   if (state.view === 'canvas') renderCanvas();
-  else renderList();
+  else if (state.view === 'list') renderList();
+  else renderDecisions();
   if (!state.selected) els.reader.hidden = true;
 }
 
@@ -1508,6 +2266,10 @@ function setBoard(board) {
   const before = state.board ? new Map(state.board.sessions.map((x) => [x.id, x.updatedAt])) : null;
   state.board = board;
   state.byId = new Map(board.sessions.map((x) => [x.id, x]));
+  if (board.meaning) {
+    state.meaning = board.meaning;
+    renderMeaningButton();
+  }
   state.loadedAt = new Date();
   layout();
   render();
@@ -1531,7 +2293,7 @@ async function refresh() {
   if (state.search) runSearch();
   if (state.selected) {
     const now = state.byId.get(state.selected);
-    if (now && before?.get(state.selected) !== now.updatedAt) select(state.selected, { focusReader: false });
+    if (now && before?.get(state.selected) !== now.updatedAt) select(state.selected, { focusReader: false, keepPlace: true });
   }
 }
 
@@ -1546,6 +2308,33 @@ function connectEvents() {
     }
   });
   es.addEventListener('index', () => refresh().catch(() => {}));
+  // Search by meaning: progress while catching up, and when it's turned on or off
+  es.addEventListener('semantic', (e) => {
+    const was = state.meaning?.state;
+    try {
+      state.meaning = JSON.parse(e.data);
+    } catch {
+      return;
+    }
+    renderMeaningButton();
+    renderMeaningPanel();
+    // Finished catching up: what's on screen can now be found by meaning too
+    if (was === 'catching-up' && state.meaning.state === 'ready' && state.search) runSearch();
+  });
+  // Decisions changed (here, in another tab, or from the CLI): reload what shows them
+  es.addEventListener('decisions', async () => {
+    const open = state.selected;
+    const before = open ? (state.board?.decisionCounts?.[open] ?? 0) : 0;
+    state.decisions = null;
+    try {
+      await refresh();
+    } catch {
+      return;
+    }
+    if (open && state.selected === open && (state.board.decisionCounts?.[open] ?? 0) !== before) {
+      select(open, { focusReader: false, keepPlace: true });
+    }
+  });
   es.onerror = () => {
     failures++;
     if (failures >= 2 && state.connected) {

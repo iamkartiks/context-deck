@@ -4,6 +4,85 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-29
+
+Search by meaning, with a model on your own computer. Optional, and off until you turn it on.
+
+### Added
+
+- **Search by meaning.** "Which chat decided on the database" finds "let's go with Postgres". Word and meaning results are merged so exact words still win. Results found only by meaning are marked "≈ by meaning", and opening one jumps to the passage that matched.
+- **Turn it on** with `contextdeck semantic enable` or the **≈** button next to the search box in the canvas.
+  - It checks the model answers first, and says exactly what's missing (for example, `ollama pull qwen3-embedding:0.6b`).
+  - It works with Ollama, or any OpenAI-compatible server (LM Studio, llama.cpp, vLLM).
+  - The default `qwen3-embedding:0.6b` handles mixed-language prompts.
+- **Background embedding:**
+  - newest sessions first, with live progress in the canvas;
+  - resumes where it stopped, and only embeds what changed;
+  - kept current by `index`, `watch` and the canvas;
+  - covers prompts, replies, titles and decisions, but not tool output.
+- `contextdeck semantic [status|enable|disable --drop]`, `search --words`, a live check in `doctor`, and `via` on every `search --json` hit.
+- `npm run eval:meaning` reports how well your model finds sessions from paraphrased, Hindi and Hinglish questions.
+
+### Security
+
+- The model server must be on this computer. Another address needs `--allow-remote` on the command line; the canvas never allows it.
+
+## [0.7.0] - 2026-10-29
+
+Find the session where something was decided.
+
+### Added
+
+- **Search shows where it matched.** While searching, each card (and list row) shows the line that matched, with the words highlighted, and how many messages match. Opening a session scrolls to that message.
+- **Find in this conversation.** A find bar in the side panel steps through every match in the session (Enter / Shift+Enter), loading older parts of long sessions as needed. Matching tool output is shown even when tool calls are hidden.
+- **Decisions.** Choose **Mark as decision** on any message (select part of it first to quote just that) and write what was settled. Decisions show on cards (a flag and a count), at the top of the side panel, in a new **Decisions** view, and in search. Edit or remove them any time.
+- **Decisions travel with handoffs.** Briefs get a "Decisions already made" section with the decisions from the session and every session it continued from, and the new agent is asked not to reopen them unless you say so.
+- `contextdeck decisions [query]`; `search` lists matching decisions first; `show` lists a session's decisions.
+- Decisions live in `~/.contextdeck/decisions.json` (owner-only), so rebuilding the index never loses them. A message that moves is found again by its fingerprint; one that's gone keeps your words.
+
+### Changed
+
+- The best match for a session prefers the conversation over tool output, so cards show what was said rather than a file path that happened to match.
+- On phones the tool filters show only their marker and count, so three tools fit.
+
+## [0.6.0] - 2026-10-29
+
+Qwen Code, and with it local and open models.
+
+### Added
+
+- **Qwen Code adapter.** Reads `~/.qwen/projects/*/chats/*.jsonl` (or `QWEN_RUNTIME_DIR` / `QWEN_HOME`, or `--qwen-dir` / `CONTEXTDECK_QWEN_DIR`), including background subagents. Sessions show their model (a local Qwen through Ollama, DeepSeek, …), tokens, the real context window, compactions, files changed, and `/rename` titles. Typed prompts are kept separate from notifications and hidden reasoning. Short ids look like `qw:3c4d5e61`.
+- **Handoff to and from Qwen Code.** `qwen -i "<brief>"` starts it with the brief and keeps the session open; `contextdeck handoff <id> --to qw`. The composer explains that where the brief goes depends on the model Qwen Code is set up with.
+- **Resume** with `qwen --resume <id>`, from the CLI or the canvas.
+- Qwen Code cards on the canvas: violet, with a diamond marker.
+- Qwen fixtures in `npm run fixtures`, and Qwen sessions in the demo data.
+
+### Changed
+
+- Handoff briefs leave out Qwen Code's plain reads and searches, as they already did for Claude Code.
+
+## [0.5.0] - 2026-10-29
+
+Windows and Linux, a smaller index, and an exact Codex compaction count.
+
+### Added
+
+- **Open in Terminal on Linux and Windows.** Linux uses `$TERMINAL` or the first of eleven common terminal apps; Windows uses Windows Terminal, or a PowerShell window. Windows support is experimental.
+- **Commands for your shell.** Copy command gives PowerShell (`Set-Location …; …`) on Windows and bash/zsh elsewhere. `contextdeck resume` prints the same.
+- On Windows, handoffs start the new session with a one-line pointer to the brief file; links and chained handoffs still work.
+- `contextdeck doctor` shows which terminal "Open in Terminal" would use.
+- `npm run fixtures` regenerates the sample sessions in `fixtures/` (scripts/make-fixtures.mjs).
+
+### Changed
+
+- **The index is less than half the size.** Search no longer keeps a second copy of every message (external-content FTS5), pages are 16 KB, and space from removed sessions is given back to the disk. On a 46 MB set of sessions: 48.7 MB → 20.0 MB (from 106% of the session files to 44%), and indexing got slightly faster (1.39 s → 1.15 s). Index schema v4; older indexes rebuild themselves once.
+- `--run` works with npm-installed tools on Windows (`.cmd` launchers).
+- Open in Terminal leaves out a project folder that no longer exists instead of failing.
+
+### Fixed
+
+- **Codex compactions were counted twice** in older session files, which record each compaction both as a `compacted` item and a `context_compacted` event. Now each is counted once (matches codex-rs/rollout/src/policy.rs).
+
 ## [0.4.0] - 2026-10-29
 
 Handoff: continue a session's work in another tool.

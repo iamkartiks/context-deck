@@ -97,6 +97,9 @@ export async function indexSources(store: Store, sources: Source[], opts: IndexO
     }
   }
 
+  // Removed or rewritten sessions leave free pages behind; give them back
+  if (sum.removed || sum.indexed) store.reclaim();
+
   sum.ms = Date.now() - started;
   return sum;
 }

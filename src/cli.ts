@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { parseArgs } from 'node:util';
@@ -8,7 +7,12 @@ import { ago, bytes, c, contextUsage, indent, providerLabel, table, tokens } fro
 import { indexSources, watchSources, type IndexSummary } from './indexer.js';
 import { openBrowser, startUiServer } from './server.js';
 import { adapterByPrefix } from './adapters/index.js';
-import { buildBrief, saveBrief, startLine } from './handoff.js';
+import { decisionMatches, loadDecisions, resolveDecisions, type ResolvedDecision } from './decisions.js';
+import { buildBrief, saveBrief, startLaunch } from './handoff.js';
+import { MeaningService, type MeaningStatus } from './meaning.js';
+import type { Progress } from './semantic.js';
+import { DEFAULT_MODEL, type SemanticSettings } from './settings.js';
+import { commandText, findTerminal, runHere } from './platform.js';
 import type { SessionRow } from './schema.js';
 import { Store } from './store.js';
 import { zstdSupported } from './util/jsonl.js';
@@ -28,9 +32,12 @@ ${c.bold('Usage')}
   contextdeck <command> [options]
 
 ${c.bold('Commands')}
-  index               Scan Claude Code and Codex session files into the local index
+  index               Scan Claude Code, Codex and Qwen Code session files into the local index
   list                Recent sessions across every tool
   search <query>      Full-text search across every session ("quoted phrase", prefix*)
+  decisions [query]   Decisions you marked, across every tool (mark them in the canvas)
+  semantic [status|enable|disable]
+                      Search by meaning with a local embedding model (off until you enable it)
   show <id>           Session details, files touched and the last messages
   resume <id>         Print (or --run) the command that reopens a session in its own tool
   handoff <id>        Continue a session's work in a new session, in any tool
@@ -42,7 +49,7 @@ ${c.bold('Commands')}
   doctor              Check paths, Node features and parse errors
 
 ${c.bold('Common options')}
-  -p, --provider <id>   Only this tool: claude-code (cc) or codex (cx)
+  -p, --provider <id>   Only this tool: claude-code (cc), codex (cx) or qwen-code (qw)
       --project <name>  Only sessions in this project (folder name or full path)
   -n, --limit <n>       How many results (default 30)
       --json            Machine-readable output (stable; this is what the UI will use)
@@ -52,9 +59,20 @@ ${c.bold('Paths')} (flag > env var > default)
       --home <dir>        Index location       CONTEXTDECK_HOME        ~/.contextdeck
       --claude-dir <dir>  Claude Code dir      CONTEXTDECK_CLAUDE_DIR  $CLAUDE_CONFIG_DIR or ~/.claude
       --codex-dir <dir>   Codex dir            CONTEXTDECK_CODEX_DIR   $CODEX_HOME or ~/.codex
+      --qwen-dir <dir>    Qwen Code dir        CONTEXTDECK_QWEN_DIR    $QWEN_RUNTIME_DIR, $QWEN_HOME or ~/.qwen
+
+${c.bold('Search by meaning')} (contextdeck semantic enable …)
+      --model <name>      Embedding model (default ${DEFAULT_MODEL}; for English only, embeddinggemma or nomic-embed-text)
+      --api <kind>        ollama (default) or openai, for LM Studio, llama.cpp's server, vLLM
+      --url <address>     Where the model server listens (default http://127.0.0.1:11434)
+      --dims <n>          Keep the first n numbers of each vector (default 512; 0 keeps all)
+      --allow-remote      Allow a server on another computer. Session text is sent to it.
+      --drop              With disable: also delete stored vectors
+      --words             With search: words only, skip meaning
 
 ${c.bold('Handoff options')}
-  -t, --to <tool>       Tool to continue in: codex (cx) or claude-code (cc). Default: the other tool
+  -t, --to <tool>       Tool to continue in: codex (cx), claude-code (cc) or qwen-code (qw).
+                        Default: Codex, or Claude Code when handing off from Codex
       --print           Only print the brief
       --run             Start the new session right here in this terminal
       --no-check-in     Let the new agent carry on without checking in first
@@ -95,6 +113,14 @@ const OPTIONS = {
   home: { type: 'string' },
   'claude-dir': { type: 'string' },
   'codex-dir': { type: 'string' },
+  'qwen-dir': { type: 'string' },
+  model: { type: 'string' },
+  api: { type: 'string' },
+  url: { type: 'string' },
+  dims: { type: 'string' },
+  'allow-remote': { type: 'boolean' },
+  drop: { type: 'boolean' },
+  words: { type: 'boolean' },
 } as const;
 
 type Values = ReturnType<typeof parseArgs<{ options: typeof OPTIONS; allowPositionals: true }>>['values'];
@@ -166,12 +192,97 @@ async function cmdIndex(cfg: Config, store: Store, v: Values): Promise<void> {
       : undefined,
   });
   if (tty) process.stderr.write('\r\x1b[K');
+  // Search by meaning, if it's on: embed what's new (stop any time with Ctrl+C)
+  const meaning = new MeaningService(store, cfg.home);
+  let meaningLine = '';
+  if (meaning.enabled && !v.words) {
+    const ctrl = new AbortController();
+    const onInt = () => ctrl.abort();
+    process.once('SIGINT', onInt);
+    try {
+      const r = await meaning.run(tty ? (p) => process.stderr.write(`\r${c.dim(progressText(p))}   `) : undefined, ctrl.signal);
+      if (tty) process.stderr.write('\r\x1b[K');
+      if (r.pieces || r.stopped) {
+        meaningLine = c.dim(`Search by meaning: ${r.stopped ? 'paused' : 'up to date'}, ${plural(r.pieces, 'piece')} from ${plural(r.sessions, 'session')} added${r.stopped ? '; carries on next time' : ''}.`);
+      }
+    } catch (err) {
+      if (tty) process.stderr.write('\r\x1b[K');
+      meaningLine = c.yellow(`Search by meaning skipped: ${(err as Error).message}`);
+    } finally {
+      process.off('SIGINT', onInt);
+    }
+  }
   print(!!v.json, sum, () => {
     const lines = [summaryLine(sum)];
     for (const e of sum.errors.slice(0, 5)) lines.push(c.red(`  ✗ ${e.path}\n    ${e.error}`));
     if (sum.errors.length > 5) lines.push(c.dim(`  …and ${sum.errors.length - 5} more (see \`contextdeck doctor\`)`));
+    if (meaningLine) lines.push(meaningLine);
     return lines.join('\n');
   });
+}
+
+function progressText(p: Progress): string {
+  return p.sessionsTotal ? `embedding: ${p.sessionsDone}/${p.sessionsTotal} sessions, ${p.pieces} pieces…` : 'embedding…';
+}
+
+function meaningSummary(st: MeaningStatus): string {
+  if (!st.enabled) return `${c.bold('Search by meaning: off.')} Turn it on once you have a local embedding model:\n  ollama pull ${DEFAULT_MODEL}\n  contextdeck semantic enable`;
+  const where = `${st.model} ${c.dim(`via ${st.api === 'ollama' ? 'Ollama' : 'OpenAI-compatible API'} at ${st.url}${st.dims ? `, ${st.dims} dims` : ''}`)}`;
+  const lines = [`${c.bold('Search by meaning: on.')} ${where}`, `  ${plural(st.pieces, 'piece')} from ${plural(st.sessions, 'session')} ${c.dim(`(${bytes(st.bytes)} of vectors)`)}`];
+  if (st.error) lines.push(c.yellow(`  Last problem: ${st.error}`));
+  return lines.join('\n');
+}
+
+async function cmdSemantic(cfg: Config, store: Store, v: Values, args: string[]): Promise<void> {
+  const sub = args[0] ?? 'status';
+  const meaning = new MeaningService(store, cfg.home);
+  if (sub === 'status') {
+    const st = meaning.status();
+    print(!!v.json, st, () => meaningSummary(st));
+    return;
+  }
+  if (sub === 'disable' || sub === 'off') {
+    const st = meaning.disable({ drop: v.drop });
+    print(!!v.json, st, () => `Search by meaning is off.${v.drop ? ' Stored vectors deleted.' : ' Vectors are kept; `--drop` deletes them.'}`);
+    return;
+  }
+  if (sub !== 'enable' && sub !== 'on') throw new UsageError('Usage: contextdeck semantic [status | enable | disable]');
+
+  const input: Partial<SemanticSettings> = {};
+  if (v.api !== undefined) {
+    if (v.api !== 'ollama' && v.api !== 'openai') throw new UsageError('--api must be ollama or openai');
+    input.api = v.api;
+  }
+  if (v.url !== undefined) input.url = v.url.replace(/\/+$/, '');
+  if (v.model !== undefined) input.model = v.model;
+  if (v.dims !== undefined) {
+    const n = Number(v.dims);
+    if (!Number.isInteger(n) || n < 0 || n > 8192) throw new UsageError('--dims must be 0 (keep all) or a whole number up to 8192');
+    input.dims = n;
+  }
+  if (v['allow-remote']) input.allowRemote = true;
+
+  if (!v.json) process.stderr.write(c.dim('Checking the model answers…\n'));
+  // The CLI catches up in the foreground instead, below, so progress can be shown
+  const st = await meaning.enable(input, { background: false });
+  if (!v.json) process.stdout.write(`${c.green('✓')} Search by meaning is on: ${st.model} ${c.dim(`at ${st.url}`)}\n`);
+
+  const tty = process.stderr.isTTY && !v.json;
+  const ctrl = new AbortController();
+  const onInt = () => ctrl.abort();
+  process.once('SIGINT', onInt);
+  try {
+    if (!v.json) process.stdout.write(c.dim('Embedding your sessions, newest first. Ctrl+C stops; it carries on next time you index or open the canvas.\n'));
+    const r = await meaning.run(tty ? (p) => process.stderr.write(`\r${c.dim(progressText(p))}   `) : undefined, ctrl.signal);
+    if (tty) process.stderr.write('\r\x1b[K');
+    print(!!v.json, { ...meaning.status(), added: r }, () =>
+      r.stopped
+        ? `Paused after ${plural(r.sessions, 'session')}. Search by meaning already covers them.`
+        : `${c.green('✓')} Done: ${plural(r.pieces, 'piece')} from ${plural(r.sessions, 'session')}. Try: contextdeck search "which chat decided on the database"`,
+    );
+  } finally {
+    process.off('SIGINT', onInt);
+  }
 }
 
 function cmdList(store: Store, v: Values): void {
@@ -184,23 +295,65 @@ function cmdList(store: Store, v: Values): void {
   print(!!v.json, rows, () => sessionTable(rows));
 }
 
-function cmdSearch(store: Store, v: Values, args: string[]): void {
+function decisionLine(d: ResolvedDecision): string {
+  const s = d.session;
+  const where = s ? `${c.bold(s.shortId)}  ${providerLabel(s.provider)}  ${s.project ?? '—'}  ${c.dim(ago(d.createdAt))}` : c.dim('(session no longer indexed)');
+  const text = d.text.replace(/\n+/g, ' ');
+  return `${c.green('◆')} ${text}\n  ${where}${d.anchored ? '' : c.dim('  · message no longer found; your words are kept')}`;
+}
+
+function cmdDecisions(cfg: Config, store: Store, v: Values, args: string[]): void {
+  const query = args.join(' ').trim();
+  const project = v.project;
+  const provider = v.provider ? (adapterByPrefix(v.provider)?.id ?? v.provider) : null;
+  const all = resolveDecisions(store, loadDecisions(cfg.home).decisions).filter(
+    (d) =>
+      (!query || decisionMatches(d, query)) &&
+      (!project || d.session?.project === project || d.session?.cwd === project) &&
+      (!provider || d.session?.provider === provider),
+  );
+  const rows = all.slice(0, intOpt(v.limit, 50, 'limit'));
+  print(
+    !!v.json,
+    rows.map(({ session, ...d }) => ({ ...d, session: session ? { id: session.id, shortId: session.shortId, title: session.title, provider: session.provider, project: session.project } : null })),
+    () => {
+      if (!rows.length) {
+        return c.dim(
+          query || project || provider
+            ? 'No decisions match.'
+            : 'No decisions yet. In the canvas (`contextdeck ui`), open a session and choose “Mark as decision” on the message that settled something.',
+        );
+      }
+      return rows.map(decisionLine).join('\n\n');
+    },
+  );
+}
+
+async function cmdSearch(cfg: Config, store: Store, v: Values, args: string[]): Promise<void> {
   const query = args.join(' ').trim();
   if (!query) throw new UsageError('Usage: contextdeck search <query>');
-  const hits = store.search(query, {
-    provider: v.provider,
-    project: v.project,
-    limit: intOpt(v.limit, 20, 'limit'),
-    raw: v.raw,
-  });
+  const limit = intOpt(v.limit, 20, 'limit');
+  const words = store.search(query, { provider: v.provider, project: v.project, limit: 200, raw: v.raw });
+  // Search by meaning joins in when it's on (and not --words / --raw)
+  const meaning = new MeaningService(store, cfg.home);
+  const found = v.words || v.raw ? null : await meaning.search(query, words, 200);
+  if (found?.error && !v.json) process.stderr.write(c.yellow(`Search by meaning unavailable (${found.error}); showing word matches.\n`));
+  const providerId = v.provider ? (adapterByPrefix(v.provider)?.id ?? v.provider) : null;
+  const hits = (found?.hits ?? words.map((h) => ({ ...h, via: 'words' as const })))
+    .filter((h) => (!providerId || h.session.provider === providerId) && (!v.project || h.session.project === v.project || h.session.cwd === v.project))
+    .slice(0, limit);
+  // JSON output stays a plain list of hits; `contextdeck decisions <query> --json` covers decisions
+  const decisions = v.json ? [] : resolveDecisions(store, loadDecisions(cfg.home).decisions).filter((d) => decisionMatches(d, query));
   print(!!v.json, hits, () => {
-    if (hits.length === 0) return c.dim(`No matches for ${JSON.stringify(query)}.`);
-    return hits
+    const head = decisions.length ? `${c.bold('Decisions')}\n${decisions.slice(0, 10).map(decisionLine).join('\n\n')}\n\n${c.bold('Messages')}\n` : '';
+    if (hits.length === 0) return head + c.dim(`No messages match ${JSON.stringify(query)}.`);
+    return head + hits
       .map((h) => {
         const s = h.session;
         const head = `${c.bold(s.shortId)}  ${providerLabel(s.provider)}  ${s.project ?? '—'}  ${c.dim(ago(s.updatedAt))}  ${s.title}`;
         const snippet = h.snippet.replace(/«/g, useHighlight('[')).replace(/»/g, useHighlight(']', true));
-        return `${head}\n${c.dim(`  ${h.role} · ${h.hits} hit${h.hits === 1 ? '' : 's'}:`)} ${snippet}`;
+        const how = h.via === 'meaning' ? `${h.role} · ${c.cyan('by meaning')}` : `${h.role} · ${h.hits} hit${h.hits === 1 ? '' : 's'}${h.via === 'both' ? ' · and by meaning' : ''}`;
+        return `${head}\n${c.dim(`  ${how}:`)} ${snippet}`;
       })
       .join('\n\n');
   });
@@ -211,7 +364,7 @@ function useHighlight(fallback: string, close = false): string {
   return close ? '\x1b[22;39m' : '\x1b[1;33m';
 }
 
-function cmdShow(store: Store, v: Values, args: string[]): void {
+function cmdShow(cfg: Config, store: Store, v: Values, args: string[]): void {
   const ref = args[0];
   if (!ref) throw new UsageError('Usage: contextdeck show <id>');
   const s = store.resolve(ref);
@@ -219,8 +372,12 @@ function cmdShow(store: Store, v: Values, args: string[]): void {
   const messages = store.messages(s.id, { last, roles: v.all ? undefined : ['user', 'assistant'] });
   const files = store.filesTouched(s.id);
   const resume = getAdapter(s.provider)?.resumeCommand(s);
+  const decisions = resolveDecisions(
+    store,
+    loadDecisions(cfg.home).decisions.filter((d) => d.sessionId === s.id),
+  ).sort((a, b) => a.seq - b.seq);
 
-  print(!!v.json, { session: s, filesTouched: files, messages, resume }, () => {
+  print(!!v.json, { session: s, filesTouched: files, messages, resume, decisions: decisions.map(({ session: _s, ...d }) => d) }, () => {
     const meta: [string, string][] = [
       ['Tool', `${providerLabel(s.provider)}${s.cliVersion ? c.dim(` ${s.cliVersion}`) : ''}`],
       ['Id', s.id],
@@ -236,6 +393,10 @@ function cmdShow(store: Store, v: Values, args: string[]): void {
     meta.push(['File', c.dim(s.sourcePath)]);
 
     const out = [c.bold(s.title), '', ...meta.map(([k, val]) => `${c.dim(k.padEnd(8))} ${val}`)];
+    if (decisions.length) {
+      out.push('', c.bold(`Decisions (${decisions.length})`));
+      out.push(...decisions.map((d) => `  ${c.green('◆')} ${d.text.replace(/\n+/g, ' ')}`));
+    }
     if (files.length) {
       out.push('', c.bold(`Files touched (${files.length})`));
       out.push(...files.slice(0, 15).map((f) => `  ${f}`));
@@ -250,7 +411,7 @@ function cmdShow(store: Store, v: Values, args: string[]): void {
         out.push(`${who} ${c.dim(ago(m.ts))}`, indent(text), '');
       }
     }
-    if (resume) out.push(c.bold('Resume'), `  ${resume.display}`);
+    if (resume) out.push(c.bold('Resume'), `  ${commandText({ cwd: resume.cwd, command: resume.command, args: resume.args }, process.platform)}`);
     return out.join('\n').trimEnd();
   });
 }
@@ -263,26 +424,14 @@ async function cmdResume(store: Store, v: Values, args: string[]): Promise<void>
   if (!adapter) throw new Error(`No adapter for provider ${s.provider}`);
   const cmd = adapter.resumeCommand(s);
 
+  const launch = { cwd: cmd.cwd, command: cmd.command, args: cmd.args };
   if (!v.run) {
-    print(!!v.json, cmd, () => cmd.display);
+    const line = commandText(launch, process.platform);
+    print(!!v.json, { ...cmd, display: line }, () => line);
     return;
   }
-  const cwd = cmd.cwd && existsSync(cmd.cwd) ? cmd.cwd : process.cwd();
-  if (cmd.cwd && cwd !== cmd.cwd) process.stderr.write(c.yellow(`Note: ${cmd.cwd} no longer exists; running here.\n`));
-  await new Promise<void>((resolveRun, reject) => {
-    const child = spawn(cmd.command, cmd.args, { cwd, stdio: 'inherit' });
-    child.on('error', (err) =>
-      reject(
-        (err as NodeJS.ErrnoException).code === 'ENOENT'
-          ? new Error(`\`${cmd.command}\` is not installed or not on your PATH.`)
-          : err,
-      ),
-    );
-    child.on('exit', (code) => {
-      process.exitCode = code ?? 0;
-      resolveRun();
-    });
-  });
+  if (cmd.cwd && !existsSync(cmd.cwd)) process.stderr.write(c.yellow(`Note: ${cmd.cwd} no longer exists; running here.\n`));
+  process.exitCode = await runHere(launch);
 }
 
 function cmdRelated(store: Store, v: Values, args: string[]): void {
@@ -338,6 +487,9 @@ function cmdProjects(store: Store, v: Values): void {
 
 async function cmdWatch(cfg: Config, store: Store, v: Values): Promise<void> {
   const first = await indexSources(store, cfg.sources);
+  // Keeps search by meaning current too, when it's on
+  const meaning = new MeaningService(store, cfg.home);
+  meaning.kick();
   if (!v.json) {
     process.stdout.write(`${summaryLine(first)}\n`);
     for (const src of cfg.sources) {
@@ -351,6 +503,7 @@ async function cmdWatch(cfg: Config, store: Store, v: Values): Promise<void> {
     (sum) => {
       if (v.json) process.stdout.write(JSON.stringify({ at: new Date().toISOString(), ...sum }) + '\n');
       else process.stdout.write(`${c.dim(new Date().toLocaleTimeString())} ${summaryLine(sum)}\n`);
+      if (sum.indexed || sum.removed) meaning.kick();
     },
     { onError: (err) => process.stderr.write(c.red(`watch error: ${String(err)}\n`)) },
   );
@@ -362,23 +515,26 @@ async function cmdWatch(cfg: Config, store: Store, v: Values): Promise<void> {
     process.once('SIGINT', stop);
     process.once('SIGTERM', stop);
   });
+  meaning.stop();
+  await meaning.idle();
 }
 
 async function cmdHandoff(cfg: Config, store: Store, v: Values, args: string[]): Promise<void> {
   const ref = args[0];
-  if (!ref) throw new UsageError('Usage: contextdeck handoff <id> [--to codex|claude-code] [--print | --run]');
+  if (!ref) throw new UsageError('Usage: contextdeck handoff <id> [--to codex|claude-code|qwen-code] [--print | --run]');
   const from = store.resolve(ref);
   const to = v.to ? adapterByPrefix(v.to)?.id : from.provider === 'codex' ? 'claude-code' : 'codex';
   const target = to ? getAdapter(to) : undefined;
-  if (!to || !target?.startCommand) throw new UsageError(`Unknown tool "${v.to}". Use codex (cx) or claude-code (cc).`);
+  if (!to || !target?.startCommand) throw new UsageError(`Unknown tool "${v.to}". Use codex (cx), claude-code (cc) or qwen-code (qw).`);
 
-  const brief = buildBrief(store, from.id, { to, checkIn: !v['no-check-in'] });
+  const brief = buildBrief(store, from.id, { to, checkIn: !v['no-check-in'], home: cfg.home });
   if (v.print) {
     process.stdout.write(brief.text);
     return;
   }
   const path = saveBrief(cfg.home, brief.handoffId, brief.text);
-  const line = startLine(target, from.cwd, path);
+  const launch = startLaunch(target, from, path, brief.handoffId);
+  const line = commandText(launch, process.platform);
 
   if (!v.run) {
     print(!!v.json, { handoffId: brief.handoffId, path, command: line, tokens: brief.tokens }, () =>
@@ -395,22 +551,14 @@ async function cmdHandoff(cfg: Config, store: Store, v: Values, args: string[]):
     return;
   }
 
-  const start = target.startCommand()!;
-  const cwd = from.cwd && existsSync(from.cwd) ? from.cwd : process.cwd();
-  if (from.cwd && cwd !== from.cwd) process.stderr.write(c.yellow(`Note: ${from.cwd} no longer exists; starting here.\n`));
+  if (from.cwd && !launch.cwd) process.stderr.write(c.yellow(`Note: ${from.cwd} no longer exists; starting here.\n`));
   process.stderr.write(c.dim(`Starting ${target.label} with the brief (${brief.handoffId})…\n`));
-  await new Promise<void>((resolveRun, reject) => {
-    const child = spawn(start.command, [...start.args, brief.text], { cwd, stdio: 'inherit' });
-    child.on('error', (err) =>
-      reject(
-        (err as NodeJS.ErrnoException).code === 'ENOENT' ? new Error(`\`${start.command}\` is not installed or not on your PATH.`) : err,
-      ),
-    );
-    child.on('exit', (code) => {
-      process.exitCode = code ?? 0;
-      resolveRun();
-    });
-  });
+  // macOS and Linux: pass the brief itself as one argument, with no shell involved.
+  // Windows: the one-line pointer prompt from startLaunch().
+  const start = target.startCommand()!;
+  process.exitCode = await runHere(
+    process.platform === 'win32' ? launch : { cwd: launch.cwd, command: start.command, args: [...start.args, brief.text] },
+  );
 }
 
 async function cmdUi(cfg: Config, store: Store, v: Values): Promise<void> {
@@ -457,6 +605,8 @@ function cmdStats(cfg: Config, store: Store, v: Values): void {
   });
 }
 
+const DIR_FLAG: Record<string, string> = { 'claude-code': 'claude', codex: 'codex', 'qwen-code': 'qwen' };
+
 async function cmdDoctor(cfg: Config, store: Store, v: Values): Promise<void> {
   let fts5 = false;
   try {
@@ -479,7 +629,23 @@ async function cmdDoctor(cfg: Config, store: Store, v: Values): Promise<void> {
   );
   const st = store.stats();
   const errors = store.fileErrors();
-  const report = { node: process.version, fts5, zstd: zstdSupported(), dbPath: cfg.dbPath, sources, stats: st, errors };
+  const terminal = findTerminal();
+  // If search by meaning is on, check the model answers right now
+  const meaningService = new MeaningService(store, cfg.home);
+  if (meaningService.enabled) await meaningService.check();
+  const meaningStatus = meaningService.status();
+  const report = {
+    meaning: meaningStatus,
+    node: process.version,
+    platform: process.platform,
+    fts5,
+    zstd: zstdSupported(),
+    terminal: terminal?.name ?? null,
+    dbPath: cfg.dbPath,
+    sources,
+    stats: st,
+    errors,
+  };
 
   print(!!v.json, report, () => {
     const ok = (b: boolean) => (b ? c.green('✓') : c.red('✗'));
@@ -487,12 +653,18 @@ async function cmdDoctor(cfg: Config, store: Store, v: Values): Promise<void> {
       `${ok(true)} Node ${process.version}`,
       `${ok(fts5)} SQLite full-text search (FTS5)`,
       `${ok(zstdSupported())} zstd support ${c.dim('(compressed Codex sessions; needs Node 22.15+)')}`,
+      `${ok(!!terminal)} Open in Terminal: ${
+        terminal ? terminal.name : c.dim(process.platform === 'linux' ? 'no terminal app or graphical session found; copy commands instead' : 'not available')
+      }`,
       `${ok(true)} Index: ${cfg.dbPath} ${c.dim(`(${bytes(st.dbBytes)}, ${st.sessions} sessions)`)}`,
+      meaningStatus.enabled
+        ? `${ok(!meaningStatus.error)} Search by meaning: ${meaningStatus.model} ${c.dim(`(${plural(meaningStatus.sessions, 'session')} embedded${meaningStatus.error ? `; ${meaningStatus.error}` : ''})`)}`
+        : `${c.dim('–')} Search by meaning: off ${c.dim('(optional; `contextdeck semantic` explains how to turn it on)')}`,
       '',
       ...sources.map(
         (s) =>
           `${ok(s.exists)} ${s.label.padEnd(12)} ${s.root} ${c.dim(
-            s.exists ? `(${s.files} session files)` : `(not found — set ${s.envVar} or --${s.provider === 'codex' ? 'codex' : 'claude'}-dir)`,
+            s.exists ? `(${s.files} session files)` : `(not found — set ${s.envVar} or --${DIR_FLAG[s.provider] ?? s.provider}-dir)`,
           )}`,
       ),
     ];
@@ -528,7 +700,7 @@ export async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
-  const cfg = loadConfig({ home: v.home, claudeDir: v['claude-dir'], codexDir: v['codex-dir'] });
+  const cfg = loadConfig({ home: v.home, claudeDir: v['claude-dir'], codexDir: v['codex-dir'], qwenDir: v['qwen-dir'] });
   let store: Store | null = null;
   try {
     store = new Store(cfg.dbPath);
@@ -542,10 +714,17 @@ export async function main(argv: string[]): Promise<number> {
         break;
       case 'search':
       case 'find':
-        cmdSearch(store, v, args);
+        await cmdSearch(cfg, store, v, args);
+        break;
+      case 'decisions':
+        cmdDecisions(cfg, store, v, args);
+        break;
+      case 'semantic':
+      case 'meaning':
+        await cmdSemantic(cfg, store, v, args);
         break;
       case 'show':
-        cmdShow(store, v, args);
+        cmdShow(cfg, store, v, args);
         break;
       case 'handoff':
       case 'continue':

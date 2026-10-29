@@ -12,7 +12,8 @@ import type { ContextSeries, NormalizedSession, ProviderId, SessionRow } from '.
  * from the providers' own session files, which are never modified.
  */
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
+const PAGE_SIZE = 16384;
 
 /** Longest context series kept per session; longer ones are downsampled. */
 const MAX_SERIES_POINTS = 120;
@@ -33,6 +34,10 @@ export function downsampleSeries(points: number[], compactions: number[], max = 
   const marks = compactions.map((c) => clamp(Math.floor(c / step), max));
   return { points: out, compactions: [...new Set(marks)] };
 }
+
+const FTS_TABLE = `CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+  text, content = 'messages', content_rowid = 'id', tokenize = 'porter unicode61'
+);`;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -91,8 +96,9 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id, seq);
 
--- Full-text index; rowid = messages.id
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(text, tokenize = 'porter unicode61');
+-- Full-text index over messages.text. "External content": the index points at
+-- the messages table instead of keeping a second copy of every message.
+${FTS_TABLE}
 
 CREATE TABLE IF NOT EXISTS session_files (
   session_id  TEXT NOT NULL,
@@ -101,6 +107,30 @@ CREATE TABLE IF NOT EXISTS session_files (
   PRIMARY KEY (session_id, path)
 );
 CREATE INDEX IF NOT EXISTS session_files_abs ON session_files(abs_path);
+
+-- Search by meaning (only filled when it's turned on). One row per piece of
+-- text that was turned into a vector: a slice of a message (seq, start, len
+-- point into messages.text, so the text isn't stored twice), a session title,
+-- or a decision. Vectors are int8, length 1 (dot product = cosine).
+CREATE TABLE IF NOT EXISTS chunks (
+  id          INTEGER PRIMARY KEY,
+  model       TEXT NOT NULL,
+  session_id  TEXT NOT NULL,
+  kind        TEXT NOT NULL,
+  ref         TEXT NOT NULL,
+  seq         INTEGER,
+  start       INTEGER,
+  len         INTEGER,
+  vec         BLOB NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS chunks_ref ON chunks(model, session_id, ref);
+-- What each session looked like when it was last embedded, to skip unchanged ones
+CREATE TABLE IF NOT EXISTS embedded_sessions (
+  model       TEXT NOT NULL,
+  session_id  TEXT NOT NULL,
+  sig         TEXT NOT NULL,
+  PRIMARY KEY (model, session_id)
+);
 `;
 
 export interface FileState {
@@ -118,11 +148,35 @@ export interface ListFilter {
   limit?: number;
 }
 
+/** A piece of text and its vector, for search by meaning. */
+export interface ChunkRow {
+  kind: 'message' | 'title' | 'decision';
+  ref: string;
+  seq: number | null;
+  start: number | null;
+  len: number | null;
+  vec: Int8Array;
+}
+
+export interface StoredChunk extends Omit<ChunkRow, 'ref'> {
+  id: number;
+  sessionId: string;
+}
+
 export interface SearchHit {
   session: SessionRow;
   snippet: string;
   role: string;
+  /** Position of the best-matching message, to open the session right there. */
+  seq: number;
   hits: number;
+}
+
+/** One message in a session that matches a search. */
+export interface SessionMatch {
+  seq: number;
+  role: string;
+  snippet: string;
 }
 
 export interface ProjectRow {
@@ -226,7 +280,13 @@ export class Store {
     this.path = dbPath;
     if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = OFF;');
+    // page_size and auto_vacuum only take effect on a new, empty file (or
+    // after VACUUM), so they come first. 16 KB pages fit several multi-KB
+    // messages each; with 4 KB pages most of each page was left empty.
+    // journal_size_limit stops the write-ahead log staying at its largest size.
+    this.db.exec(
+      `PRAGMA page_size = ${PAGE_SIZE}; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 4194304; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = OFF;`,
+    );
     this.migrate();
   }
 
@@ -240,14 +300,22 @@ export class Store {
       );
     }
     if (current > 0 && current < SCHEMA_VERSION) {
-      // v2 added the context-over-time series, v3 the handoff link. The index
-      // is a cache, so the simplest correct upgrade is to add any missing
-      // columns and re-read every file.
+      // v2 added the context-over-time series, v3 the handoff link, v4 the
+      // smaller search index and incremental vacuum. The index is a cache, so
+      // the simplest correct upgrade is to fix up the tables, empty them, and
+      // re-read every file.
       const cols = new Set((this.db.prepare(`PRAGMA table_info(sessions)`).all() as Row[]).map((c) => String(c.name)));
       for (const col of ['context_series', 'handoff_id', 'handoff_from']) {
         if (!cols.has(col)) this.db.exec(`ALTER TABLE sessions ADD COLUMN ${col} TEXT`);
       }
-      this.db.exec(`DELETE FROM messages_fts; DELETE FROM messages; DELETE FROM session_files; DELETE FROM sessions; DELETE FROM files;`);
+      this.db.exec(`DROP TABLE IF EXISTS messages_fts`);
+      this.db.exec(FTS_TABLE);
+      this.db.exec(`DELETE FROM messages; DELETE FROM session_files; DELETE FROM sessions; DELETE FROM files;`);
+      // Rewrite the file with the new page size and incremental vacuum, handing
+      // the old space back. The page size can't change while in WAL mode.
+      this.db.exec(
+        `PRAGMA journal_mode = DELETE; PRAGMA page_size = ${PAGE_SIZE}; PRAGMA auto_vacuum = INCREMENTAL; VACUUM; PRAGMA journal_mode = WAL;`,
+      );
     }
     // Created after the upgrade above so the column exists on older indexes
     this.db.exec(`CREATE INDEX IF NOT EXISTS sessions_handoff ON sessions(handoff_from)`);
@@ -258,6 +326,23 @@ export class Store {
 
   close(): void {
     this.db.close();
+  }
+
+  /**
+   * Hand unused space back to the disk. Cheap to call: it only does work when
+   * a meaningful share of the file is free (e.g. after sessions were removed).
+   */
+  reclaim(): { freedBytes: number } {
+    const n = (sql: string) => Number(Object.values(this.db.prepare(sql).get() as Row)[0] ?? 0);
+    // Fold the write-ahead log into the main file first, so free pages are counted
+    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    const pageSize = n('PRAGMA page_size');
+    const free = n('PRAGMA freelist_count');
+    const total = n('PRAGMA page_count');
+    if (free < 64 || free < total * 0.1) return { freedBytes: 0 };
+    this.db.exec('PRAGMA incremental_vacuum');
+    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    return { freedBytes: (free - n('PRAGMA freelist_count')) * pageSize };
   }
 
   private tx<T>(fn: () => T): T {
@@ -335,7 +420,11 @@ export class Store {
   }
 
   private deleteSessionData(sessionId: string, includeRow: boolean): void {
-    this.db.prepare(`DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM messages WHERE session_id = ?)`).run(sessionId);
+    // External-content FTS5 needs the old text to remove a row from the index,
+    // so this must run before the messages themselves are deleted.
+    this.db
+      .prepare(`INSERT INTO messages_fts(messages_fts, rowid, text) SELECT 'delete', id, text FROM messages WHERE session_id = ?`)
+      .run(sessionId);
     this.db.prepare(`DELETE FROM messages WHERE session_id = ?`).run(sessionId);
     this.db.prepare(`DELETE FROM session_files WHERE session_id = ?`).run(sessionId);
     if (includeRow) this.db.prepare(`DELETE FROM sessions WHERE id = ?`).run(sessionId);
@@ -532,19 +621,21 @@ export class Store {
     params.push(filter.limit ?? 20);
     // FTS auxiliary functions (bm25, snippet) can't run inside an aggregate, so rank every
     // matching message first (materialized), then keep the best-ranked one per session.
+    // bm25 is negative (lower is better); halving it for tool output means a match in
+    // the conversation is shown ahead of a file path or command that happens to match.
     // SQLite returns the bare columns (role, snip) from the row that produced MIN(score).
     const sql = `
       WITH matches AS MATERIALIZED (
-        SELECT m.session_id, m.role, snippet(messages_fts, 0, '«', '»', '…', 14) AS snip,
-               bm25(messages_fts) AS score
+        SELECT m.session_id, m.role, m.seq, snippet(messages_fts, 0, '«', '»', '…', 14) AS snip,
+               bm25(messages_fts) * (CASE WHEN m.role = 'tool' THEN 0.5 ELSE 1.0 END) AS score
         FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
         WHERE messages_fts MATCH ?
       ),
       best AS (
-        SELECT session_id, role, snip, MIN(score) AS best, COUNT(*) AS hits
+        SELECT session_id, role, seq, snip, MIN(score) AS best, COUNT(*) AS hits
         FROM matches GROUP BY session_id
       )
-      SELECT s.*, best.snip, best.role AS hit_role, best.hits, best.best
+      SELECT s.*, best.snip, best.role AS hit_role, best.seq AS hit_seq, best.hits, best.best
       FROM best JOIN sessions s ON s.id = best.session_id
       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
       ORDER BY best.best LIMIT ?`;
@@ -553,12 +644,125 @@ export class Store {
         session: toSessionRow(r),
         snippet: String(r.snip ?? '').replace(/\s+/g, ' '),
         role: String(r.hit_role),
+        seq: Number(r.hit_seq),
         hits: Number(r.hits),
       }));
     } catch (err) {
       if (/fts5|syntax/i.test(String(err))) throw new Error(`Invalid search query: ${query}`);
       throw err;
     }
+  }
+
+  /** Every message in one session that matches a search, in conversation order. */
+  matchesIn(sessionId: string, query: string, limit = 1000): SessionMatch[] {
+    const fts = toFtsQuery(query);
+    if (!fts) return [];
+    try {
+      return (
+        this.db
+          .prepare(
+            `SELECT m.seq, m.role, snippet(messages_fts, 0, '«', '»', '…', 14) AS snip
+             FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
+             WHERE messages_fts MATCH ? AND m.session_id = ?
+             ORDER BY m.seq LIMIT ?`,
+          )
+          .all(fts, sessionId, limit) as Row[]
+      ).map((r) => ({ seq: Number(r.seq), role: String(r.role), snippet: String(r.snip ?? '').replace(/\s+/g, ' ') }));
+    } catch (err) {
+      if (/fts5|syntax/i.test(String(err))) throw new Error(`Invalid search query: ${query}`);
+      throw err;
+    }
+  }
+
+  // ── Search by meaning: storage ────────────────────────────────────────────
+
+  /** Sessions to embed, most recently active first. */
+  sessionsForEmbedding(): { id: string; title: string; updatedAt: string | null; messageCount: number }[] {
+    return (this.db.prepare(`SELECT id, title, updated_at, message_count FROM sessions ORDER BY updated_at DESC`).all() as Row[]).map((r) => ({
+      id: String(r.id),
+      title: String(r.title),
+      updatedAt: (r.updated_at as string | null) ?? null,
+      messageCount: Number(r.message_count),
+    }));
+  }
+
+  embeddedSignatures(model: string): Map<string, string> {
+    const rows = this.db.prepare(`SELECT session_id, sig FROM embedded_sessions WHERE model = ?`).all(model) as Row[];
+    return new Map(rows.map((r) => [String(r.session_id), String(r.sig)]));
+  }
+
+  chunkRefs(model: string, sessionId: string): Map<string, number> {
+    const rows = this.db.prepare(`SELECT id, ref FROM chunks WHERE model = ? AND session_id = ?`).all(model, sessionId) as Row[];
+    return new Map(rows.map((r) => [String(r.ref), Number(r.id)]));
+  }
+
+  /** Add and remove one session's pieces, and record what it looked like, in one step. */
+  applyChunks(model: string, sessionId: string, add: ChunkRow[], removeIds: number[], sig: string | null): void {
+    this.tx(() => {
+      const del = this.db.prepare(`DELETE FROM chunks WHERE id = ?`);
+      for (const id of removeIds) del.run(id);
+      const ins = this.db.prepare(
+        `INSERT OR REPLACE INTO chunks (model, session_id, kind, ref, seq, start, len, vec) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const c of add) {
+        ins.run(model, sessionId, c.kind, c.ref, c.seq, c.start, c.len, new Uint8Array(c.vec.buffer, c.vec.byteOffset, c.vec.byteLength));
+      }
+      if (sig != null) {
+        this.db
+          .prepare(`INSERT INTO embedded_sessions (model, session_id, sig) VALUES (?, ?, ?) ON CONFLICT(model, session_id) DO UPDATE SET sig = excluded.sig`)
+          .run(model, sessionId, sig);
+      }
+    });
+  }
+
+  /** Drop vectors from other models and for sessions that are gone. */
+  pruneChunks(model: string): number {
+    let removed = 0;
+    this.tx(() => {
+      removed += Number(this.db.prepare(`DELETE FROM chunks WHERE model != ? OR session_id NOT IN (SELECT id FROM sessions)`).run(model).changes);
+      this.db.prepare(`DELETE FROM embedded_sessions WHERE model != ? OR session_id NOT IN (SELECT id FROM sessions)`).run(model);
+    });
+    return removed;
+  }
+
+  dropChunks(): void {
+    this.db.exec(`DELETE FROM chunks; DELETE FROM embedded_sessions;`);
+  }
+
+  /** Changes whenever vectors are added or removed, to know when a cached copy is stale. */
+  chunkStamp(model: string): string {
+    const r = this.db.prepare(`SELECT COUNT(*) AS n, MAX(id) AS m FROM chunks WHERE model = ?`).get(model) as Row;
+    return `${r.n}:${r.m ?? 0}`;
+  }
+
+  chunkStats(model: string): { pieces: number; sessions: number; bytes: number } {
+    const r = this.db
+      .prepare(`SELECT COUNT(*) AS n, COUNT(DISTINCT session_id) AS s, COALESCE(SUM(LENGTH(vec)), 0) AS b FROM chunks WHERE model = ?`)
+      .get(model) as Row;
+    return { pieces: Number(r.n), sessions: Number(r.s), bytes: Number(r.b) };
+  }
+
+  loadChunks(model: string): StoredChunk[] {
+    return (this.db.prepare(`SELECT id, session_id, kind, seq, start, len, vec FROM chunks WHERE model = ?`).all(model) as Row[]).map((r) => {
+      const b = r.vec as Uint8Array;
+      return {
+        id: Number(r.id),
+        sessionId: String(r.session_id),
+        kind: String(r.kind) as ChunkRow['kind'],
+        seq: r.seq == null ? null : Number(r.seq),
+        start: r.start == null ? null : Number(r.start),
+        len: r.len == null ? null : Number(r.len),
+        vec: new Int8Array(b.buffer, b.byteOffset, b.byteLength),
+      };
+    });
+  }
+
+  /** One message by its position in the session. */
+  messageAt(sessionId: string, seq: number): StoredMessage | null {
+    const r = this.db.prepare(`SELECT seq, role, ts, tool_name, text FROM messages WHERE session_id = ? AND seq = ?`).get(sessionId, seq) as
+      | Row
+      | undefined;
+    return r ? { seq: Number(r.seq), role: String(r.role), ts: (r.ts as string | null) ?? null, toolName: (r.tool_name as string | null) ?? null, text: String(r.text) } : null;
   }
 
   /** Sessions grouped by working directory, across every provider. */

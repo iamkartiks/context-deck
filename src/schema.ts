@@ -7,7 +7,7 @@
  */
 
 /** Built-in provider ids. Third-party adapters may use any other string. */
-export type ProviderId = 'claude-code' | 'codex' | (string & {});
+export type ProviderId = 'claude-code' | 'codex' | 'qwen-code' | (string & {});
 
 export type Role = 'user' | 'assistant' | 'tool' | 'system';
 

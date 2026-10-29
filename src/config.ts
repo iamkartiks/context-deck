@@ -13,6 +13,7 @@ export interface ConfigOverrides {
   home?: string;
   claudeDir?: string;
   codexDir?: string;
+  qwenDir?: string;
   providers?: string[];
 }
 
@@ -22,6 +23,7 @@ export interface ConfigOverrides {
  *   CONTEXTDECK_HOME        index location           (default ~/.contextdeck)
  *   CONTEXTDECK_CLAUDE_DIR  Claude Code config dir   (default $CLAUDE_CONFIG_DIR or ~/.claude)
  *   CONTEXTDECK_CODEX_DIR   Codex home               (default $CODEX_HOME or ~/.codex)
+ *   CONTEXTDECK_QWEN_DIR    Qwen Code folder         (default $QWEN_RUNTIME_DIR, $QWEN_HOME or ~/.qwen)
  */
 export function loadConfig(overrides: ConfigOverrides = {}, env: NodeJS.ProcessEnv = process.env): Config {
   const userHome = homedir();
@@ -29,6 +31,7 @@ export function loadConfig(overrides: ConfigOverrides = {}, env: NodeJS.ProcessE
   const flagRoots: Record<string, string | undefined> = {
     'claude-code': overrides.claudeDir,
     codex: overrides.codexDir,
+    'qwen-code': overrides.qwenDir,
   };
   const wanted = overrides.providers?.length ? new Set(overrides.providers) : null;
   const sources = ADAPTERS.filter((a) => !wanted || wanted.has(a.id) || wanted.has(a.shortPrefix)).map((adapter) => ({

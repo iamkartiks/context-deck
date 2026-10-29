@@ -6,12 +6,25 @@ import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { getAdapter, type ResumeCommand } from './adapters/index.js';
 import { loadBoard, sanitizeBoard, saveBoard } from './board.js';
+import {
+  addDecision,
+  decisionMatches,
+  deleteDecision,
+  isDecisionId,
+  loadDecisions,
+  resolveDecisions,
+  updateDecision,
+  type ResolvedDecision,
+} from './decisions.js';
 import type { Config } from './config.js';
 import { indexSources, watchSources, type IndexSummary, type Watcher } from './indexer.js';
 import type { Store } from './store.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildBrief, finalizeBrief, handoffTargets, saveBrief, startLine } from './handoff.js';
+import { buildBrief, finalizeBrief, handoffTargets, saveBrief, startLaunch } from './handoff.js';
+import { MeaningService } from './meaning.js';
+import { isLocalUrl, type SemanticSettings } from './settings.js';
+import { commandText, findTerminal, openInTerminal, type Launch, type TerminalInfo } from './platform.js';
 import { HANDOFF_ID_RE } from './handoff-marker.js';
 
 /**
@@ -61,12 +74,16 @@ export interface UiServerOptions {
   portAttempts?: number;
   /** Watch the session folders and push updates to open pages. Default true. */
   watch?: boolean;
-  /** Override the platform check for "open in terminal" (tests). */
+  /** Override the platform: command style and "open in terminal" (tests). */
   platform?: NodeJS.Platform;
+  /** Override terminal detection; null means none available (tests). */
+  terminal?: TerminalInfo | null;
   /** Replace the terminal launcher (tests). */
-  launchTerminal?: (shellCommand: string) => Promise<void>;
+  launchTerminal?: (launch: Launch) => Promise<void>;
   /** Summary of the index run that happened just before starting, shown in the UI. */
   initialIndex?: IndexSummary;
+  /** Search by meaning (tests pass their own). */
+  meaning?: MeaningService;
 }
 
 export interface UiServer {
@@ -85,25 +102,9 @@ class HttpError extends Error {
   }
 }
 
-function shellQuote(s: string): string {
-  return /^[A-Za-z0-9_./:@%+=-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
-}
-
-/** The exact shell line to run (not the truncated display string). */
-export function shellLine(cmd: ResumeCommand): string {
-  const run = [cmd.command, ...cmd.args].map(shellQuote).join(' ');
-  return cmd.cwd ? `cd ${shellQuote(cmd.cwd)} && ${run}` : run;
-}
-
-/** Open Terminal.app on macOS and run one shell line in a new window. */
-export function launchMacTerminal(shellCommand: string): Promise<void> {
-  const escaped = shellCommand.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  const script = `tell application "Terminal"\n  activate\n  do script "${escaped}"\nend tell`;
-  return new Promise((resolve, reject) => {
-    const child = spawn('osascript', ['-e', script], { stdio: 'ignore' });
-    child.on('error', reject);
-    child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`osascript exited with ${code}`))));
-  });
+/** A resume command as a platform-neutral launch. */
+export function resumeLaunch(cmd: ResumeCommand): Launch {
+  return { cwd: cmd.cwd, command: cmd.command, args: cmd.args };
 }
 
 function send(res: ServerResponse, status: number, body: unknown): void {
@@ -141,8 +142,20 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
 export async function startUiServer(store: Store, cfg: Config, opts: UiServerOptions = {}): Promise<UiServer> {
   const token = randomBytes(24).toString('base64url');
   const platform = opts.platform ?? process.platform;
-  const launchTerminal = opts.launchTerminal ?? launchMacTerminal;
-  const canOpenTerminal = platform === 'darwin';
+  const terminal = opts.terminal !== undefined ? opts.terminal : findTerminal(platform);
+  const canOpenTerminal = !!terminal;
+  const noTerminal =
+    platform === 'linux'
+      ? 'No terminal app was found (or there is no graphical session). Copy the command instead.'
+      : 'Opening a terminal is not supported on this system. Copy the command instead.';
+  const launchTerminal = async (l: Launch) => {
+    try {
+      await (opts.launchTerminal ? opts.launchTerminal(l) : openInTerminal(l, platform).then(() => {}));
+    } catch (err) {
+      throw new HttpError(500, `Couldn't open a terminal: ${(err as Error).message}`);
+    }
+  };
+  const meaning = opts.meaning ?? new MeaningService(store, cfg.home);
   const clients = new Set<ServerResponse>();
   let port = 0;
   let lastIndex: IndexSummary | null = opts.initialIndex ?? null;
@@ -165,6 +178,7 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       version,
       generatedAt: new Date().toISOString(),
       sessions,
+      decisionCounts: decisionCounts(),
       subagentCounts: store.subagentCounts(),
       ...graph,
       providers: [...new Set(sessions.map((s) => s.provider))].sort().map((id) => ({
@@ -173,28 +187,77 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
         shortPrefix: getAdapter(id)?.shortPrefix ?? id.slice(0, 2),
       })),
       lastIndex,
+      meaning: meaning.status(),
       sources: cfg.sources.map((s) => ({ provider: s.adapter.id, label: s.adapter.label, root: s.root })),
       capabilities: {
         openTerminal: canOpenTerminal,
+        terminalName: terminal?.name ?? null,
         handoffTargets: handoffTargets().map((a) => ({ id: a.id, label: a.label })),
       },
     };
   };
 
-  const sessionDetail = (ref: string) => {
+  const decisionCounts = () => {
+    const counts: Record<string, number> = {};
+    for (const d of loadDecisions(cfg.home).decisions) counts[d.sessionId] = (counts[d.sessionId] ?? 0) + 1;
+    return counts;
+  };
+
+  /** A decision as the UI needs it: the decision plus a short summary of its session. */
+  const decisionView = (d: ResolvedDecision) => ({
+    id: d.id,
+    sessionId: d.sessionId,
+    seq: d.seq,
+    text: d.text,
+    anchored: d.anchored,
+    createdAt: d.createdAt,
+    updatedAt: d.updatedAt,
+    session: d.session
+      ? {
+          id: d.session.id,
+          shortId: d.session.shortId,
+          title: d.session.title,
+          provider: d.session.provider,
+          project: d.session.project,
+          cwd: d.session.cwd,
+          gitBranch: d.session.gitBranch,
+          updatedAt: d.session.updatedAt,
+        }
+      : null,
+  });
+
+  const allDecisions = () => resolveDecisions(store, loadDecisions(cfg.home).decisions);
+
+  /**
+   * One session for the side panel. Long sessions send a window of messages:
+   * the latest ones, or the ones around `around` when jumping to a search
+   * match or a decision.
+   */
+  const sessionDetail = (ref: string, around?: number) => {
     const s = store.resolve(ref);
     const resume = getAdapter(s.provider)?.resumeCommand(s) ?? null;
     const all = store.messages(s.id);
-    const messages = all.length > MAX_MESSAGES ? all.slice(-MAX_MESSAGES) : all;
+    let start = Math.max(0, all.length - MAX_MESSAGES);
+    if (around != null && all.length > MAX_MESSAGES) {
+      const at = all.findIndex((m) => m.seq >= around);
+      if (at >= 0) start = Math.min(Math.max(0, at - Math.floor(MAX_MESSAGES / 2)), all.length - MAX_MESSAGES);
+    }
+    const messages = all.slice(start, start + MAX_MESSAGES);
+    const decisions = resolveDecisions(
+      store,
+      loadDecisions(cfg.home).decisions.filter((d) => d.sessionId === s.id),
+    ).sort((a, b) => a.seq - b.seq);
     return {
       session: s,
       filesTouched: store.filesTouched(s.id),
       contextSeries: store.contextSeries(s.id),
       messages,
-      truncatedMessages: all.length - messages.length,
+      truncatedMessages: start,
+      truncatedAfter: all.length - start - messages.length,
+      decisions: decisions.map(decisionView),
       related: store.related(s.id, 12),
       subagents: store.subagents(s.id),
-      resume: resume ? { ...resume, shell: shellLine(resume) } : null,
+      resume: resume ? { ...resume, shell: commandText(resumeLaunch(resume), platform) } : null,
     };
   };
 
@@ -236,8 +299,10 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
 
     if (method === 'GET' && path.startsWith('/api/session/')) {
       const ref = decodeURIComponent(path.slice('/api/session/'.length));
+      const aroundParam = url.searchParams.get('around');
+      const around = aroundParam != null && /^\d{1,9}$/.test(aroundParam) ? Number(aroundParam) : undefined;
       try {
-        return send(res, 200, sessionDetail(ref));
+        return send(res, 200, sessionDetail(ref, around));
       } catch (err) {
         throw new HttpError(404, (err as Error).message);
       }
@@ -247,10 +312,78 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       const q = (url.searchParams.get('q') ?? '').slice(0, 500);
       const provider = url.searchParams.get('provider') ?? undefined;
       try {
-        return send(res, 200, { query: q, hits: store.search(q, { provider, limit: 200 }) });
+        const words = store.search(q, { provider, limit: 200 });
+        const found = await meaning.search(q, words, 200);
+        const providerId = provider ? (getAdapter(provider)?.id ?? provider) : null;
+        const hits = providerId ? found.hits.filter((h) => h.session.provider === providerId) : found.hits;
+        const decisions = q.trim() ? allDecisions().filter((d) => decisionMatches(d, q) && (!provider || d.session?.provider === provider)) : [];
+        return send(res, 200, {
+          query: q,
+          hits,
+          decisions: decisions.map(decisionView),
+          meaning: { used: found.usedMeaning, error: found.error },
+        });
       } catch (err) {
         throw new HttpError(400, (err as Error).message);
       }
+    }
+
+    // Every match inside one session, for "find in this conversation"
+    if (method === 'GET' && path === '/api/matches') {
+      const id = url.searchParams.get('id') ?? '';
+      const q = (url.searchParams.get('q') ?? '').slice(0, 500);
+      let s;
+      try {
+        s = store.resolve(id);
+      } catch (err) {
+        throw new HttpError(404, (err as Error).message);
+      }
+      try {
+        return send(res, 200, { query: q, matches: store.matchesIn(s.id, q) });
+      } catch (err) {
+        throw new HttpError(400, (err as Error).message);
+      }
+    }
+
+    if (method === 'GET' && path === '/api/decisions') {
+      return send(res, 200, { decisions: allDecisions().map(decisionView) });
+    }
+
+    if (method === 'POST' && path === '/api/decisions') {
+      const body = (await readBody(req)) as { sessionId?: unknown; seq?: unknown; text?: unknown } | null;
+      if (!body || typeof body.sessionId !== 'string' || typeof body.seq !== 'number' || typeof body.text !== 'string') {
+        throw new HttpError(400, 'Expected {"sessionId", "seq", "text"}.');
+      }
+      let created;
+      try {
+        created = addDecision(cfg.home, store, { sessionId: body.sessionId, seq: body.seq, text: body.text });
+      } catch (err) {
+        const msg = (err as Error).message;
+        throw new HttpError(/No session matches/.test(msg) ? 404 : 400, msg);
+      }
+      broadcast('decisions', { count: loadDecisions(cfg.home).decisions.length });
+      return send(res, 201, decisionView(resolveDecisions(store, [created])[0]!));
+    }
+
+    if ((method === 'PUT' || method === 'DELETE') && path.startsWith('/api/decisions/')) {
+      const id = decodeURIComponent(path.slice('/api/decisions/'.length));
+      if (!isDecisionId(id)) throw new HttpError(404, 'No such decision.');
+      if (method === 'DELETE') {
+        if (!deleteDecision(cfg.home, id)) throw new HttpError(404, 'No such decision.');
+        broadcast('decisions', { count: loadDecisions(cfg.home).decisions.length });
+        return send(res, 200, { ok: true });
+      }
+      const body = (await readBody(req)) as { text?: unknown } | null;
+      if (!body || typeof body.text !== 'string') throw new HttpError(400, 'Expected {"text"}.');
+      let updated;
+      try {
+        updated = updateDecision(cfg.home, id, body.text);
+      } catch (err) {
+        const msg = (err as Error).message;
+        throw new HttpError(/No such/.test(msg) ? 404 : 400, msg);
+      }
+      broadcast('decisions', { count: loadDecisions(cfg.home).decisions.length });
+      return send(res, 200, decisionView(resolveDecisions(store, [updated])[0]!));
     }
 
     if (method === 'GET' && path === '/api/layout') return send(res, 200, loadBoard(cfg.home));
@@ -266,7 +399,32 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       lastIndex = sum;
       version++;
       broadcast('index', { version, summary: sum });
+      meaning.kick();
       return send(res, 200, sum);
+    }
+
+    if (method === 'GET' && path === '/api/semantic') return send(res, 200, meaning.status());
+
+    // Turn search by meaning on (after checking the model answers) or off
+    if (method === 'PUT' && path === '/api/semantic') {
+      const body = (await readBody(req)) as { enabled?: unknown; api?: unknown; url?: unknown; model?: unknown; dims?: unknown; drop?: unknown } | null;
+      if (!body || typeof body.enabled !== 'boolean') throw new HttpError(400, 'Expected {"enabled": true|false}.');
+      if (!body.enabled) return send(res, 200, meaning.disable({ drop: body.drop === true }));
+      const input: Partial<SemanticSettings> = {};
+      if (body.api === 'ollama' || body.api === 'openai') input.api = body.api;
+      if (typeof body.url === 'string' && body.url.trim()) input.url = body.url.trim().replace(/\/+$/, '');
+      if (typeof body.model === 'string' && /^[\w.:/@+-]{1,200}$/.test(body.model.trim())) input.model = body.model.trim();
+      else if (body.model !== undefined) throw new HttpError(400, 'That model name has characters a model name can’t have.');
+      if (typeof body.dims === 'number' && Number.isInteger(body.dims) && body.dims >= 0 && body.dims <= 8192) input.dims = body.dims;
+      // Sending session text to another computer is only allowed from the command line, deliberately
+      if (input.url && !isLocalUrl(input.url)) {
+        throw new HttpError(400, 'That address isn’t on this computer. To send session text to another machine, use `contextdeck semantic enable --url … --allow-remote`.');
+      }
+      try {
+        return send(res, 200, await meaning.enable(input));
+      } catch (err) {
+        throw new HttpError(400, (err as Error).message);
+      }
     }
 
     if (method === 'GET' && path === '/api/handoff/preview') {
@@ -280,6 +438,7 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
           to,
           checkIn: url.searchParams.get('checkIn') !== '0',
           handoffId: url.searchParams.get('handoffId') ?? undefined,
+          home: cfg.home,
         });
       } catch (err) {
         throw new HttpError(404, (err as Error).message);
@@ -323,18 +482,19 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
         throw new HttpError(400, (err as Error).message);
       }
       const briefPath = saveBrief(cfg.home, body.handoffId, text);
-      const line = startLine(target, from.cwd, briefPath);
+      const launch = startLaunch(target, from, briefPath, body.handoffId, platform);
+      const line = commandText(launch, platform);
       let launched = false;
       if (body.launch === true) {
-        if (!canOpenTerminal) throw new HttpError(501, 'Opening a terminal is only supported on macOS. Copy the command instead.');
-        await launchTerminal(line);
+        if (!canOpenTerminal) throw new HttpError(501, noTerminal);
+        await launchTerminal(launch);
         launched = true;
       }
       return send(res, 200, { handoffId: body.handoffId, path: briefPath, command: line, launched });
     }
 
     if (method === 'POST' && path === '/api/open-terminal') {
-      if (!canOpenTerminal) throw new HttpError(501, 'Opening a terminal is only supported on macOS. Copy the command instead.');
+      if (!canOpenTerminal) throw new HttpError(501, noTerminal);
       const body = (await readBody(req)) as { id?: unknown } | null;
       if (!body || typeof body.id !== 'string') throw new HttpError(400, 'Expected {"id": "<session id>"}.');
       let s;
@@ -345,8 +505,9 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       }
       const cmd = getAdapter(s.provider)?.resumeCommand(s);
       if (!cmd) throw new HttpError(404, `No adapter for ${s.provider}.`);
-      const line = shellLine(cmd);
-      await launchTerminal(line);
+      const launch = resumeLaunch(cmd);
+      const line = commandText(launch, platform);
+      await launchTerminal(launch);
       return send(res, 200, { ok: true, command: line });
     }
 
@@ -406,8 +567,11 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       lastIndex = summary;
       version++;
       broadcast('index', { version, summary });
+      if (summary.indexed || summary.removed) meaning.kick();
     });
   }
+  const stopMeaningEvents = meaning.onChange((status) => broadcast('semantic', status));
+  meaning.kick();
   const heartbeat = setInterval(() => {
     for (const res of clients) res.write(': keep-alive\n\n');
   }, 25_000);
@@ -420,6 +584,8 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       new Promise<void>((resolve) => {
         clearInterval(heartbeat);
         watcher?.close();
+        stopMeaningEvents();
+        meaning.stop();
         for (const res of clients) res.end();
         clients.clear();
         server.close(() => resolve());

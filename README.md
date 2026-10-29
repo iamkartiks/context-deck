@@ -1,14 +1,14 @@
 # ContextDeck
 
-**One local index for every AI coding agent session.** Search, organise and resume your context windows across Claude Code, Codex and more, from one place.
+**One local index for every AI coding agent session.** Search, organise and resume your context windows across Claude Code, Codex, Qwen Code and more, from one place.
 
-If you use more than one coding agent, your context is scattered: Claude Code keeps sessions per project folder, Codex keeps them per date, and neither knows the other exists. ContextDeck reads both, puts them in one searchable index on your machine, and links related work across tools.
+If you use more than one coding agent, your context is scattered: Claude Code keeps sessions per project folder, Codex keeps them per date, and neither knows the other exists. ContextDeck reads them all, puts them in one searchable index on your machine, and links related work across tools.
 
 ```bash
 contextdeck ui
 ```
 
-![The ContextDeck canvas: sessions from Claude Code (yellow) and Codex (grey) as cards on a dotted board, grouped into workstreams like "session cookies" and "offline sync". Each card fills up to show how full its context window is.](docs/images/canvas.png)
+![The ContextDeck canvas: sessions from Claude Code (yellow), Codex (grey) and Qwen Code (violet) as cards on a dotted board, grouped into workstreams like "offline sync" and "dedupe.py and events.py". Each card fills up to show how full its context window is.](docs/images/canvas.png)
 
 Every session is a card on a canvas. Cards from both tools gather into **workstreams**: sessions that edited the same files or ran on the same feature branch, whichever tool they ran in. Each card **fills up like a glass** to show how full its context window is, with a line for every time it was compacted, and groups that were active in the last hour **glow**. Drag cards wherever you like and ContextDeck remembers, or **Tidy up** into a neat grid. Click one to read it: how its context grew turn by turn, what it changed, what it's related to, and how to jump back in.
 
@@ -39,7 +39,7 @@ $ contextdeck resume cx:d5e6f701 --run     # reopens it in Codex, in the right f
 
 ## Principles
 
-- **Local only.** Nothing leaves your machine. No accounts, no telemetry, no network calls.
+- **Local only.** Nothing leaves your machine. No accounts, no telemetry, no network calls. (Optional search by meaning talks to a model server on your own computer, and only after you turn it on.)
 - **Read only.** Your agents' session files are never modified. The index is a disposable cache; delete it any time.
 - **Secrets stripped at the door.** API keys, tokens, passwords and private keys are redacted before anything is indexed.
 - **Zero native dependencies.** Built on Node's built-in SQLite, so installing never involves compiling anything.
@@ -79,15 +79,17 @@ contextdeck ui      # indexes, then opens the canvas in your browser
 | **Move around** | Drag the background, or scroll. Pinch or ⌘/Ctrl+scroll to zoom. `+` `-` zoom, `0` shows everything. |
 | **Arrange** | Drag cards anywhere; positions are saved per grouping. **Tidy up** lines everything up in a grid; **Scatter** goes back to the loose layout with your placements. |
 | **Group by** | **Workstream** (linked work across tools), **Project**, **Tool** or **Day**. Threads between cards show sessions that edited the same files. |
-| **Search** | Press `/`. The board narrows to matching sessions (searching their full conversations, titles, projects and branches) and zooms to fit them. |
-| **Read** | Click a card: context use over the session (real per-turn data, with each compaction marked), files it changed, related sessions in other tools, subagents, and the conversation (tool calls hidden unless you ask). |
-| **Resume** | **Copy command**, or on macOS **Open in Terminal**, which runs it in a new Terminal window in the right folder. |
+| **Search** | Press `/`. The board narrows to matching sessions (searching their full conversations, titles, projects and branches) and each card shows the line that matched and how many times. Open one and it scrolls to that message. With [search by meaning](#search-by-meaning-optional) on, the button next to the search box, sessions about the same thing show up too, marked "≈ by meaning". |
+| **Read** | Click a card: context use over the session (real per-turn data, with each compaction marked), files it changed, related sessions in other tools, subagents, and the conversation (tool calls hidden unless you ask). **Find in this conversation** steps through every match, loading older parts of long sessions as needed. |
+| **Decisions** | Hover a message and choose **Mark as decision** (select part of it first to quote just that). See [Decisions](#decisions). |
+| **Resume** | **Copy command**, or **Open in Terminal**, which runs it in a new terminal window in the right folder (see [Windows, macOS and Linux](#windows-macos-and-linux)). |
 | **Hand off** | **Continue in…** another tool, or start a **fresh session** in the same one, from a brief you can edit. See [Handoff](#handoff). |
 | **List view** | Every session in rows, grouped the same way as the canvas. Handy on small screens. |
+| **Decisions view** | Every decision you marked, by project, newest first. Search filters them too. |
 
 Options: `--port <n>`, `--no-open`. The page loads nothing from the internet (fonts are bundled) and only this computer can reach it; see [SECURITY.md](SECURITY.md) for how it's locked down.
 
-Claude Code doesn't record how big its context window is, so its fill level is an **estimate** (200k tokens, or 1M once a session goes past 200k), shown as "~200k" in the side panel. Codex records the real window size.
+Claude Code doesn't record how big its context window is, so its fill level is an **estimate** (200k tokens, or 1M once a session goes past 200k), shown as "~200k" in the side panel. Codex and Qwen Code record the real window size.
 
 ## Commands
 
@@ -96,8 +98,10 @@ Claude Code doesn't record how big its context window is, so its fill level is a
 | `ui` | Open the canvas in your browser (see above). |
 | `index [--full]` | Scan session files into the index. Incremental: only changed files are re-read. |
 | `list` | Recent sessions across every tool. `--all` includes subagents. |
-| `search <query>` | Full-text search. Words are ANDed; `"exact phrase"`, `prefix*` and `OR` work. |
-| `show <id>` | Metadata, files touched, context usage, last messages and the resume command. `--all` adds tool calls, `-m 30` shows more. |
+| `search <query>` | Full-text search. Words are ANDed; `"exact phrase"`, `prefix*` and `OR` work. Matching decisions are listed first. |
+| `decisions [query]` | Decisions you marked, across every tool. `--project`, `-p` and `--json` work here too. |
+| `semantic [status\|enable\|disable]` | [Search by meaning](#search-by-meaning-optional) with a local embedding model. Off until you enable it. |
+| `show <id>` | Metadata, decisions, files touched, context usage, last messages and the resume command. `--all` adds tool calls, `-m 30` shows more. |
 | `resume <id> [--run]` | Print, or run, the command that reopens the session in its own tool and folder. |
 | `handoff <id> [--to codex\|claude-code] [--print\|--run]` | Continue a session's work in a new session. Saves a brief and prints the command that starts it; `--run` starts it here, `--print` just shows the brief. Defaults to the other tool. |
 | `related <id>` | Sessions in *any* tool that edited the same files (or share the branch). |
@@ -107,20 +111,35 @@ Claude Code doesn't record how big its context window is, so its fill level is a
 
 Common options: `-p claude-code|codex` (or `cc|cx`), `--project <name>`, `-n <limit>`, and `--json` on every command for scripting.
 
-**Ids.** Every session gets a short id like `cc:0f3a1b11` (Claude Code) or `cx:d5e6f701` (Codex). Anywhere an id is expected you can also paste a full id or any unique fragment of it.
+**Ids.** Every session gets a short id like `cc:0f3a1b11` (Claude Code), `cx:d5e6f701` (Codex) or `qw:3c4d5e61` (Qwen Code). Anywhere an id is expected you can also paste a full id or any unique fragment of it.
 
 ## Handoff
 
 Sometimes the next step belongs in a different tool, or the current window is too full to think in. A handoff starts a new session that knows what the old one knew.
 
-1. **Brief.** ContextDeck writes it from what's already indexed: the goal, your later instructions, the previous session's last replies, the files it changed and the commands it ran, plus instructions to check `git status` first and not redo finished work. By default the new agent summarises where things stand and waits for your go-ahead; turn that off to let it carry on. The brief is a few hundred to a few thousand tokens, at most about 6k.
+1. **Brief.** ContextDeck writes it from what's already indexed: the goal, your later instructions, the [decisions](#decisions) you marked, the previous session's last replies, the files it changed and the commands it ran, plus instructions to check `git status` first and not redo finished work. By default the new agent summarises where things stand and waits for your go-ahead; turn that off to let it carry on. The brief is a few hundred to a few thousand tokens, at most about 6k.
 2. **Review.** You see the whole brief, can edit anything, and see how much of the new window it uses. Nothing has left your computer yet.
-3. **Start.** **Open in Terminal** (macOS) or **Copy command** runs, for example, `cd ~/code/shop && codex "$(cat ~/.contextdeck/handoffs/hf_….md)"`. Briefs are kept in `~/.contextdeck/handoffs/`, readable only by you. (The copied command is for macOS and Linux shells; on Windows, use `contextdeck handoff <id> --run`, which starts the tool directly.)
+3. **Start.** **Open in Terminal** or **Copy command** runs, for example, `cd ~/code/shop && codex "$(cat ~/.contextdeck/handoffs/hf_….md)"`. Briefs are kept in `~/.contextdeck/handoffs/`, readable only by you. On Windows the new session starts with a one-line message pointing at the brief file instead, because a long multi-line message can't be passed safely through the Windows command line; the agent reads the file and carries on.
 4. **Link.** The brief carries a line like `(ContextDeck handoff hf_1a2b3c4d5e from claude-code:…)`. When the new session is indexed, ContextDeck reads it and links the two sessions. Because the link lives in the transcript, it survives rebuilding the index.
 
-**Privacy:** starting a handoff to a different tool sends the brief to that tool's company (OpenAI for Codex, Anthropic for Claude Code), the same as typing it yourself. The brief is built from redacted text, but read it before you start.
+**Privacy:** starting a handoff to a different tool sends the brief to that tool's company (OpenAI for Codex, Anthropic for Claude Code), the same as typing it yourself. For Qwen Code it goes to whichever model Qwen Code is set up to use: nowhere, if that's a local model. The brief is built from redacted text, but read it before you start.
 
 The brief is assembled from the session itself, not written by an AI, so it's instant, free and works offline. An optional AI-written summary is on the [roadmap](docs/ROADMAP.md).
+
+## Decisions
+
+Long sessions bury the moment something got settled: "use Postgres", "keep the old header for one release". Six sessions later, nobody remembers which one it was in.
+
+![Searching "mobile header" days later: the card shows the decision that matched, and the side panel opens at the message where it was decided.](docs/images/decisions.png)
+
+**Mark it when it happens.** In any session's conversation, choose **Mark as decision** on the message that settled it, and write it the way you'd want to read it later (or select part of the message first to quote just that). Then:
+
+- the session's card shows a flag with the count, and the side panel lists its decisions at the top, each a click away from the message it came from;
+- the **Decisions** view lists every decision across tools and projects;
+- search finds decisions as well as messages, and a matching decision is what the card shows;
+- every handoff brief includes the decisions from that session *and* the sessions it continued from, under "Decisions already made", with an instruction not to reopen them unless you ask.
+
+Decisions are yours, so they're kept in `~/.contextdeck/decisions.json` (readable only by you), not in the index: rebuilding the index never loses them. If a session file changes and the message moves, it's found again; if it's gone, your words are kept.
 
 ## Where it looks
 
@@ -128,15 +147,67 @@ The brief is assembled from the session itself, not written by an AI, so it's in
 |---|---|---|
 | Claude Code | `~/.claude/projects/` | `--claude-dir`, `CONTEXTDECK_CLAUDE_DIR`, or Claude's own `CLAUDE_CONFIG_DIR` |
 | Codex CLI | `~/.codex/sessions/` and `archived_sessions/` | `--codex-dir`, `CONTEXTDECK_CODEX_DIR`, or Codex's own `CODEX_HOME` |
+| Qwen Code | `~/.qwen/projects/` | `--qwen-dir`, `CONTEXTDECK_QWEN_DIR`, or Qwen Code's own `QWEN_RUNTIME_DIR` / `QWEN_HOME` |
 | The index | `~/.contextdeck/index.db` | `--home`, `CONTEXTDECK_HOME` |
 | Your canvas arrangement | `~/.contextdeck/board.json` | same folder as the index |
 | Handoff briefs | `~/.contextdeck/handoffs/` | same folder as the index |
+| Your decisions | `~/.contextdeck/decisions.json` | same folder as the index |
+| Your settings (search by meaning) | `~/.contextdeck/config.json` | same folder as the index |
+
+## Windows, macOS and Linux
+
+The CLI and the canvas work the same everywhere. The session folders above are found from your home folder on every system (`~` is `C:\Users\<you>` on Windows), so there's nothing to configure. What differs is how ContextDeck starts a tool for you:
+
+| | macOS | Linux | Windows (experimental) |
+|---|---|---|---|
+| **Copy command** | bash/zsh: `cd … && claude --resume …` | bash/zsh, same | PowerShell: `Set-Location …; claude --resume …` |
+| **Open in Terminal** | Terminal | `$TERMINAL`, or the first of gnome-terminal, konsole, xfce4-terminal, kitty, alacritty, wezterm, ghostty, foot, tilix, x-terminal-emulator, xterm | Windows Terminal, or a PowerShell window |
+| **`--run`** | runs the tool directly | same | runs it through the shell, so npm-installed tools work |
+
+- **Linux over SSH**, or with no terminal app installed: there's no window to open, so the canvas shows **Copy command** only. `contextdeck doctor` tells you which terminal it found.
+- **Windows** support is tested by CI on every change but hasn't had much use on real machines yet. Please [report anything odd](https://github.com/iamkartiks/context-deck/issues). Commands that contain characters cmd.exe treats specially (`" % ^ & | < > !`) are never sent to a new window; you'll be asked to copy them instead.
+- **WSL:** if your agents run inside WSL, their sessions live in WSL's home folder. Run ContextDeck inside WSL too, or point it there from Windows with `--claude-dir \\wsl$\Ubuntu\home\<you>\.claude` (and `--codex-dir` likewise).
+
+## Search by meaning (optional)
+
+Word search finds what you typed. Search by meaning finds what you *meant*: "which chat decided on the database" finds the session where the agent said "let's go with Postgres", and "making the database upgrade safe" finds "plan the Postgres 15 to 17 upgrade with as little downtime as possible". It uses an embedding model that runs on your computer, so nothing leaves it.
+
+![Searching "making the database upgrade safe" with search by meaning on: the Postgres-on-RDS upgrade session is found by meaning, and the side panel opens at the message that matched.](docs/images/meaning.png)
+
+It's **off until you turn it on**, because it needs a local model. With [Ollama](https://ollama.com):
+
+```bash
+ollama pull qwen3-embedding:0.6b
+contextdeck semantic enable
+```
+
+Or click the **≈** button next to the search box in the canvas. ContextDeck checks the model answers, then embeds your sessions in the background, newest first. Search uses what's done straight away, and new sessions are added as they come in. `contextdeck semantic` shows how far it got; Ctrl+C or closing the canvas pauses it, and it carries on next time.
+
+| | |
+|---|---|
+| **Which model** | `qwen3-embedding:0.6b` (the default) handles many languages and code, so it's the one to use if you write prompts in more than one language, Hindi and English, say. `bge-m3` is the other good multilingual choice. For English only, `embeddinggemma` and `nomic-embed-text` are smaller and faster. |
+| **Other servers** | LM Studio, llama.cpp's server and vLLM work too: `contextdeck semantic enable --api openai --url http://127.0.0.1:1234 --model <name>`. |
+| **What's embedded** | Your prompts, the agents' replies (long ones in overlapping pieces), session titles and your decisions. Not tool output: file dumps and logs would drown out what was said. |
+| **How results mix** | Word matches and meaning matches are merged, so an exact word still wins. Results found only by meaning are marked "≈ by meaning" and opening one jumps to the passage that matched. If the model isn't running, search quietly falls back to words. |
+| **Size** | About 0.5 KB per piece of text with the default 512 numbers per vector (`--dims` changes it), kept in the index file. |
+| **Turning it off** | `contextdeck semantic disable` (add `--drop` to delete the vectors), or **Turn off** in the canvas. |
+
+**How well does it work with your model?** `npm run eval:meaning` builds a small set of made-up sessions and asks questions that share few or no words with the answer, in English, Hindi and Hinglish, then reports how often the right session comes first. Try other models with `-- --model bge-m3`. With a tiny English-only test model it found the right session first for 7 of 10 English questions where word search found none; mixed-language questions need a multilingual model like the default.
+
+The model server must be on this computer. Pointing ContextDeck at one elsewhere sends your session text there, so it's refused unless you add `--allow-remote` on the command line; the canvas never allows it.
+
+## Local and open models (Qwen, DeepSeek, …)
+
+ContextDeck reads the session files coding agents write, so it doesn't matter which model an agent ran. **Qwen Code** is the agent built for Qwen models, and it runs any OpenAI-compatible model too: a local one through Ollama, vLLM or LM Studio, or a hosted one such as DeepSeek. Every Qwen Code session shows up in ContextDeck with its model name, tokens, context window and compactions, and you can hand work to and from it like any other tool (`--to qw`). Starting a handoff runs `qwen -i "<brief>"`, so the session stays open after the brief.
+
+Running Codex with a local model (`codex --oss`) also works today: those sessions are saved in the same place as any other Codex session. More agents that people use with local models (OpenCode, Aider, Goose, Cline) are on the [roadmap](docs/ROADMAP.md).
 
 ## How it works
 
 ```
  ~/.claude/projects/**.jsonl ─┐                      ┌─ CLI: list / search / show / resume
- ~/.codex/sessions/**.jsonl  ─┼─▶ adapters ─▶ SQLite ─┤
+ ~/.codex/sessions/**.jsonl  ─┤                      │
+ ~/.qwen/projects/**.jsonl   ─┼─▶ adapters ─▶ SQLite ─┤
  (your next agent here)      ─┘   (normalise,  + FTS5 └─ local server ─▶ canvas in your browser
                                    redact)
 ```
@@ -168,7 +239,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) to get set up (it takes about two minute
 
 ## Not affiliated
 
-ContextDeck is an independent community project. It is not affiliated with or endorsed by Anthropic or OpenAI. "Claude Code" and "Codex" are named only to describe compatibility.
+ContextDeck is an independent community project. It is not affiliated with or endorsed by Anthropic, OpenAI or Alibaba. "Claude Code", "Codex" and "Qwen Code" are named only to describe compatibility.
 
 ## License
 
