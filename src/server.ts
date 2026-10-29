@@ -30,14 +30,10 @@ const STATIC: Record<string, { file: string; type: string }> = {
   '/app.js': { file: 'app.js', type: 'text/javascript; charset=utf-8' },
   '/style.css': { file: 'style.css', type: 'text/css; charset=utf-8' },
   '/favicon.svg': { file: 'favicon.svg', type: 'image/svg+xml' },
-  '/fonts/schibsted-grotesk-latin-wght-normal.woff2': {
-    file: 'fonts/schibsted-grotesk-latin-wght-normal.woff2',
-    type: 'font/woff2',
-  },
-  '/fonts/schibsted-grotesk-latin-ext-wght-normal.woff2': {
-    file: 'fonts/schibsted-grotesk-latin-ext-wght-normal.woff2',
-    type: 'font/woff2',
-  },
+  '/fonts/geist-latin-wght-normal.woff2': { file: 'fonts/geist-latin-wght-normal.woff2', type: 'font/woff2' },
+  '/fonts/geist-latin-ext-wght-normal.woff2': { file: 'fonts/geist-latin-ext-wght-normal.woff2', type: 'font/woff2' },
+  '/fonts/geist-mono-latin-wght-normal.woff2': { file: 'fonts/geist-mono-latin-wght-normal.woff2', type: 'font/woff2' },
+  '/fonts/geist-mono-latin-ext-wght-normal.woff2': { file: 'fonts/geist-mono-latin-ext-wght-normal.woff2', type: 'font/woff2' },
 };
 
 const CSP = [
@@ -186,6 +182,7 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
     return {
       session: s,
       filesTouched: store.filesTouched(s.id),
+      contextSeries: store.contextSeries(s.id),
       messages,
       truncatedMessages: all.length - messages.length,
       related: store.related(s.id, 12),

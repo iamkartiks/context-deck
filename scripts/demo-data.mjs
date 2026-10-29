@@ -35,37 +35,95 @@ const HOME = '/Users/sam/code';
 const encode = (cwd) => cwd.replace(/[/.]/g, '-');
 
 /**
+ * A believable context curve: context grows turn by turn, drops sharply at each
+ * compaction, and ends at `final` tokens. Returns the points and the indexes
+ * where compactions happen (before that point).
+ */
+function curve(final, compactions, window, seed) {
+  const n = Math.max(6, compactions * 4 + 5 + Math.round(seedRand(seed) * 6));
+  const segs = compactions + 1;
+  const points = [];
+  const marks = [];
+  let base = Math.max(5_000, Math.round(final * 0.07));
+  for (let sgi = 0; sgi < segs; sgi++) {
+    const last = sgi === segs - 1;
+    const len = last ? n - points.length : Math.floor(n / segs);
+    const peak = last ? final : Math.round(window * (0.86 + seedRand(seed + sgi) * 0.08));
+    for (let j = 1; j <= len; j++) {
+      const t = j / len;
+      const wiggle = last && j === len ? 0 : (seedRand(seed * 7 + points.length) - 0.5) * 0.04 * peak;
+      points.push(Math.max(1_000, Math.round(base + (peak - base) * Math.pow(t, 0.9) + wiggle)));
+    }
+    if (!last) {
+      marks.push(points.length);
+      base = Math.round(peak * (0.18 + seedRand(seed + 40 + sgi) * 0.1));
+    }
+  }
+  return { points, marks };
+}
+
+function seedRand(n) {
+  const x = Math.sin(n * 12.9898 + 78.233) * 43758.5453;
+  return x - Math.floor(x);
+}
+
+const BUSYWORK = [
+  { name: 'Read', input: (cwd, f) => ({ file_path: `${cwd}/${f}` }) },
+  { name: 'Grep', input: () => ({ pattern: 'TODO|FIXME' }) },
+  { name: 'Bash', input: () => ({ command: 'npm test -- --silent' }) },
+  { name: 'Read', input: (cwd, f) => ({ file_path: `${cwd}/${f}` }) },
+  { name: 'Bash', input: () => ({ command: 'git diff --stat' }) },
+];
+
+/**
  * Claude Code session.
  * ctx: final context size in tokens. files: files edited (relative to cwd).
  */
 function claude({ cwd, branch, hoursAgo, minutes = 25, prompt, reply, finalText, followUp, files = [], ctx, compactions = 0, model = 'claude-opus-4-5', subagent }) {
   const id = uuid(hoursAgo * 13);
   const start = hoursAgo * H;
-  const step = (minutes * 60_000) / 8;
+  const { points, marks } = curve(ctx, compactions, 200_000, hoursAgo);
+  const step = (minutes * 60_000) / (points.length * 2 + 4);
   const base = { sessionId: id, cwd, gitBranch: branch, version: '2.4.1', userType: 'external' };
   let t = start;
   const at = () => iso((t -= step));
   const lines = [];
   let n = 0;
-  const usage = (frac) => {
-    const total = Math.round(ctx * frac);
-    return { input_tokens: 400, cache_creation_input_tokens: Math.round(total * 0.2), cache_read_input_tokens: Math.round(total * 0.8) - 400 - 700, output_tokens: 700 };
-  };
+  const usage = (total) => ({
+    input_tokens: 400,
+    cache_creation_input_tokens: Math.round(total * 0.15),
+    cache_read_input_tokens: Math.max(0, total - Math.round(total * 0.15) - 400 - 700),
+    output_tokens: 700,
+  });
+  const say = (content, total) =>
+    lines.push({ ...base, type: 'assistant', uuid: `a${n++}`, timestamp: at(), message: { id: `m${n}`, role: 'assistant', model, content, usage: usage(total) } });
+  const results = (tools) =>
+    lines.push({ ...base, type: 'user', uuid: `u${n++}`, timestamp: at(), message: { role: 'user', content: tools.map((tl) => ({ type: 'tool_result', tool_use_id: tl.id, content: 'ok' })) } });
 
   lines.push({ ...base, type: 'user', uuid: `u${n++}`, timestamp: at(), message: { role: 'user', content: prompt } });
-  lines.push({ ...base, type: 'assistant', uuid: `a${n++}`, timestamp: at(), message: { id: `m${n}`, role: 'assistant', model, content: [{ type: 'text', text: reply }], usage: usage(0.3) } });
-  const tools = files.map((f, i) => ({ type: 'tool_use', id: `t${i}`, name: i === 0 ? 'Edit' : 'Write', input: { file_path: `${cwd}/${f}` } }));
-  if (tools.length) {
-    lines.push({ ...base, type: 'assistant', uuid: `a${n++}`, timestamp: at(), message: { id: `m${n}`, role: 'assistant', model, content: tools, usage: usage(0.5) } });
-    lines.push({ ...base, type: 'user', uuid: `u${n++}`, timestamp: at(), message: { role: 'user', content: tools.map((tl) => ({ type: 'tool_result', tool_use_id: tl.id, content: 'ok' })) } });
-  }
-  for (let i = 0; i < compactions; i++) {
-    lines.push({ ...base, type: 'system', subtype: 'compact_boundary', uuid: `c${n++}`, timestamp: at(), content: 'Conversation compacted' });
-  }
-  if (followUp) {
-    lines.push({ ...base, type: 'user', uuid: `u${n++}`, timestamp: at(), message: { role: 'user', content: followUp } });
-  }
-  lines.push({ ...base, type: 'assistant', uuid: `a${n++}`, timestamp: at(), message: { id: `m${n}`, role: 'assistant', model, content: [{ type: 'tool_use', id: 'tz', name: 'Bash', input: { command: 'npm test' } }, { type: 'text', text: finalText }], usage: usage(1) } });
+  points.forEach((total, i) => {
+    if (marks.includes(i)) {
+      lines.push({ ...base, type: 'system', subtype: 'compact_boundary', uuid: `c${n++}`, timestamp: at(), content: 'Conversation compacted' });
+    }
+    const lastTurn = i === points.length - 1;
+    if (i === 0) {
+      say([{ type: 'text', text: reply }], total);
+    } else if (lastTurn) {
+      say([{ type: 'tool_use', id: `tz${i}`, name: 'Bash', input: { command: 'npm test' } }, { type: 'text', text: finalText }], total);
+    } else if (i === 1 && files.length) {
+      const tools = files.map((f, k) => ({ type: 'tool_use', id: `t${i}-${k}`, name: k === 0 ? 'Edit' : 'Write', input: { file_path: `${cwd}/${f}` } }));
+      say(tools, total);
+      results(tools);
+    } else {
+      const b = BUSYWORK[i % BUSYWORK.length];
+      const tool = { type: 'tool_use', id: `t${i}`, name: b.name, input: b.input(cwd, files[0] ?? 'README.md') };
+      say([tool], total);
+      results([tool]);
+    }
+    if (followUp && i === Math.floor(points.length / 2)) {
+      lines.push({ ...base, type: 'user', uuid: `u${n++}`, timestamp: at(), message: { role: 'user', content: followUp } });
+    }
+  });
 
   write(`claude/projects/${encode(cwd)}/${id}.jsonl`, lines);
 
@@ -82,7 +140,8 @@ function claude({ cwd, branch, hoursAgo, minutes = 25, prompt, reply, finalText,
 function codex({ cwd, branch, hoursAgo, minutes = 20, prompt, reply, finalText, followUp, files = [], ctx, compactions = 0, model = 'gpt-5.5' }) {
   const id = uuid(hoursAgo * 17);
   const start = hoursAgo * H;
-  const step = (minutes * 60_000) / 8;
+  const { points, marks } = curve(ctx, compactions, 272_000, hoursAgo + 0.5);
+  const step = (minutes * 60_000) / (points.length * 3 + 6);
   let t = start;
   const at = () => iso((t -= step));
   const ev = (type, payload) => ({ timestamp: at(), type, payload });
@@ -92,19 +151,34 @@ function codex({ cwd, branch, hoursAgo, minutes = 20, prompt, reply, finalText, 
     ev('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: `<environment_context>\n  <cwd>${cwd}</cwd>\n</environment_context>` }] }),
     ev('turn_context', { cwd, model, approval_policy: 'on-request' }),
     ev('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: prompt }] }),
-    ev('response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: reply }] }),
-    ev('response_item', { type: 'function_call', name: 'shell', call_id: 'c1', arguments: JSON.stringify({ command: ['bash', '-lc', 'rg -n "TODO" .'] }) }),
-    ev('response_item', { type: 'function_call_output', call_id: 'c1', output: JSON.stringify({ output: '(results)', metadata: { exit_code: 0 } }) }),
   ];
-  if (files.length) {
-    const patch = ['*** Begin Patch', ...files.map((f, i) => `*** ${i === 0 ? 'Update' : 'Add'} File: ${f}`), '*** End Patch'].join('\n');
-    lines.push(ev('response_item', { type: 'custom_tool_call', name: 'apply_patch', call_id: 'c2', input: patch }));
-    lines.push(ev('response_item', { type: 'custom_tool_call_output', call_id: 'c2', output: 'Success.' }));
-  }
-  for (let i = 0; i < compactions; i++) lines.push(ev('compacted', { message: 'Summary…' }));
-  if (followUp) lines.push(ev('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: followUp }] }));
-  lines.push(ev('event_msg', { type: 'token_count', info: { total_token_usage: { input_tokens: Math.round(ctx * 2.4), output_tokens: Math.round(ctx * 0.06) }, last_token_usage: { input_tokens: ctx - 1500, output_tokens: 1500 }, model_context_window: 272000 } }));
-  lines.push(ev('response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: finalText }] }));
+  let totalIn = 0;
+  let totalOut = 0;
+  const tokens = (ctxNow) => {
+    totalIn += ctxNow - 1500;
+    totalOut += 1500;
+    lines.push(ev('event_msg', { type: 'token_count', info: { total_token_usage: { input_tokens: totalIn, output_tokens: totalOut }, last_token_usage: { input_tokens: ctxNow - 1500, output_tokens: 1500 }, model_context_window: 272000 } }));
+  };
+  points.forEach((ctxNow, i) => {
+    if (marks.includes(i)) lines.push(ev('compacted', { message: 'Summary of the conversation so far…' }));
+    const lastTurn = i === points.length - 1;
+    if (i === 0) {
+      lines.push(ev('response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: reply }] }));
+    } else if (i === 1 && files.length) {
+      const patch = ['*** Begin Patch', ...files.map((f, k) => `*** ${k === 0 ? 'Update' : 'Add'} File: ${f}`), '*** End Patch'].join('\n');
+      lines.push(ev('response_item', { type: 'custom_tool_call', name: 'apply_patch', call_id: `c${i}`, input: patch }));
+      lines.push(ev('response_item', { type: 'custom_tool_call_output', call_id: `c${i}`, output: 'Success.' }));
+    } else if (!lastTurn) {
+      const cmd = ['rg -n "TODO" .', 'npm test', 'git status --short', 'ls -la'][i % 4];
+      lines.push(ev('response_item', { type: 'function_call', name: 'shell', call_id: `c${i}`, arguments: JSON.stringify({ command: ['bash', '-lc', cmd] }) }));
+      lines.push(ev('response_item', { type: 'function_call_output', call_id: `c${i}`, output: JSON.stringify({ output: '(output)', metadata: { exit_code: 0 } }) }));
+    }
+    if (followUp && i === Math.floor(points.length / 2)) {
+      lines.push(ev('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: followUp }] }));
+    }
+    tokens(ctxNow);
+    if (lastTurn) lines.push(ev('response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: finalText }] }));
+  });
 
   const d = new Date(NOW - start);
   const pad = (x) => String(x).padStart(2, '0');

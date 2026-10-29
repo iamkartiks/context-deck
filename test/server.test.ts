@@ -95,7 +95,7 @@ describe('ui server', () => {
 
   it('serves only the known static files', async () => {
     assert.equal((await call(server.port, '/app.js')).status, 200);
-    assert.equal((await call(server.port, '/fonts/schibsted-grotesk-latin-wght-normal.woff2')).status, 200);
+    assert.equal((await call(server.port, '/fonts/geist-latin-wght-normal.woff2')).status, 200);
     assert.equal((await call(server.port, '/../package.json')).status, 404);
     assert.equal((await call(server.port, '/%2e%2e/package.json')).status, 404);
     assert.equal((await call(server.port, '/index.html')).status, 404);
@@ -131,6 +131,7 @@ describe('ui server', () => {
     assert.equal(d.related[0].session.provider, 'codex');
     assert.equal(d.subagents.length, 1);
     assert.ok(d.messages.length > 0);
+    assert.deepEqual(d.contextSeries, { points: [16_500, 19_500, 44_000], compactions: [2] });
     assert.equal((await call(server.port, '/api/session/nope')).status, 404);
   });
 

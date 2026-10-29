@@ -8,11 +8,11 @@ If you use more than one coding agent, your context is scattered: Claude Code ke
 contextdeck ui
 ```
 
-![The ContextDeck canvas: sessions from Claude Code (saffron) and Codex (indigo) as cards, grouped into workstreams like "session cookies" and "offline sync". Each card fills up to show how full its context window is.](docs/images/canvas.png)
+![The ContextDeck canvas: sessions from Claude Code (yellow) and Codex (grey) as cards on a dotted board, grouped into workstreams like "session cookies" and "offline sync". Each card fills up to show how full its context window is.](docs/images/canvas.png)
 
-Every session is a card on a canvas. Cards from both tools gather into **workstreams**: sessions that edited the same files or ran on the same feature branch, whichever tool they ran in. Each card **fills up like a glass** to show how full its context window is, with a line for every time it was compacted. Drag cards wherever you like; ContextDeck remembers. Click one to read it, see what it changed and what it's related to, and jump back into it.
+Every session is a card on a canvas. Cards from both tools gather into **workstreams**: sessions that edited the same files or ran on the same feature branch, whichever tool they ran in. Each card **fills up like a glass** to show how full its context window is, with a line for every time it was compacted, and groups that were active in the last hour **glow**. Drag cards wherever you like and ContextDeck remembers, or **Tidy up** into a neat grid. Click one to read it: how its context grew turn by turn, what it changed, what it's related to, and how to jump back in.
 
-![A session open in the reader: the resume command with Copy and Open in Terminal buttons, a context gauge, the files it changed, and related sessions from the other tool.](docs/images/reader.png)
+![A session open in the side panel: the resume command, a large context percentage with a chart of context use over the session, and the session's details.](docs/images/reader.png)
 
 Prefer the terminal? Everything is in the CLI too:
 
@@ -73,16 +73,16 @@ contextdeck ui      # indexes, then opens the canvas in your browser
 | | |
 |---|---|
 | **Move around** | Drag the background, or scroll. Pinch or ⌘/Ctrl+scroll to zoom. `+` `-` zoom, `0` shows everything. |
-| **Arrange** | Drag cards anywhere. Positions are saved per grouping. **Tidy up** puts them back. |
+| **Arrange** | Drag cards anywhere; positions are saved per grouping. **Tidy up** lines everything up in a grid; **Scatter** goes back to the loose layout with your placements. |
 | **Group by** | **Workstream** (linked work across tools), **Project**, **Tool** or **Day**. Threads between cards show sessions that edited the same files. |
-| **Search** | Press `/`. Matching cards light up and the rest fade; results list on the left. |
-| **Read** | Click a card: context gauge, files it changed, related sessions in other tools, subagents, and the conversation (tool calls hidden unless you ask). |
+| **Search** | Press `/`. The board narrows to matching sessions (searching their full conversations, titles, projects and branches) and zooms to fit them. |
+| **Read** | Click a card: context use over the session (real per-turn data, with each compaction marked), files it changed, related sessions in other tools, subagents, and the conversation (tool calls hidden unless you ask). |
 | **Resume** | **Copy command**, or on macOS **Open in Terminal**, which runs it in a new Terminal window in the right folder. |
-| **List view** | A sortable table of everything, handy on small screens. |
+| **List view** | Every session in rows, grouped the same way as the canvas. Handy on small screens. |
 
 Options: `--port <n>`, `--no-open`. The page loads nothing from the internet (fonts are bundled) and only this computer can reach it; see [SECURITY.md](SECURITY.md) for how it's locked down.
 
-Claude Code doesn't record how big its context window is, so its fill level is an **estimate** (200k tokens, or 1M once a session goes past 200k), drawn with a dashed line. Codex records the real window size.
+Claude Code doesn't record how big its context window is, so its fill level is an **estimate** (200k tokens, or 1M once a session goes past 200k), shown as "~200k" in the side panel. Codex records the real window size.
 
 ## Commands
 

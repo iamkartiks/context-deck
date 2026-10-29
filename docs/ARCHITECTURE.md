@@ -76,7 +76,7 @@ The CLI (`src/cli.ts`) is a thin layer over the store. Every command supports `-
 | Route | |
 |---|---|
 | `GET /api/board` | All top-level sessions, workstreams, edges, subagent counts, providers, capabilities |
-| `GET /api/session/:id` | One session: messages (last 600), files, related, subagents, resume command |
+| `GET /api/session/:id` | One session: messages (last 600), files, context over time, related, subagents, resume command |
 | `GET /api/search?q=` | Full-text search hits with snippets |
 | `GET /api/events` | Server-sent events; `index` fires whenever the watcher re-indexes |
 | `GET` / `PUT /api/layout` | Hand-placed card positions, stored in `board.json` (not in the index, so rebuilding the index never loses them) |
@@ -91,7 +91,10 @@ Writes need the per-run token embedded in the page; see [SECURITY.md](../SECURIT
 
 - **Layout** is computed in the browser. Each group becomes a zone sized to its cards; zones are shelf-packed, trying many row widths and keeping the one whose shape best fits the screen. Hand-placed positions override the automatic ones, per grouping, and zones stretch around wherever their cards actually are.
 - **Session text is never parsed as HTML.** Everything goes through `h()`, which creates text nodes. Search highlights come back from the server as `«…»` markers and are turned into `<mark>` elements by splitting strings.
-- **Context fill** uses the real window for Codex and an estimate for Claude Code (200k, or 1M once a session has gone past 200k), shown with a dashed line.
+- **Context fill** uses the real window for Codex and an estimate for Claude Code (200k, or 1M once a session has gone past 200k), shown as "~200k".
+- **Context over time.** Adapters record the context size after every model turn (`contextSeries`) and where compactions happened (`compactionPoints`). The store keeps at most 120 points per session (`downsampleSeries`) in `sessions.context_series`, and `GET /api/session/:id` returns it for the chart in the side panel.
+- **Design.** The look comes from the "minimal organiser" design: ground `#E4E3DF`, surface `#F7F6F2`, ink `#161616`, one accent (`#F4C95D`, Claude Code) and a warm grey (`#B7B3AA`, Codex). Tokens are CSS custom properties at the top of `style.css`; Geist and Geist Mono are bundled under `ui/fonts/` (SIL OFL). Cards stay paper-coloured in dark mode.
+- Cards are positioned with the CSS `translate` property, not `transform`: individual transform properties apply before `transform`, so a tilted card positioned with `transform` would also have its position rotated.
 - Browser storage holds only view preferences (view, grouping, hidden tools) and is optional.
 
 ## Why these choices

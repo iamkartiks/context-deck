@@ -1,11 +1,13 @@
-// ContextDeck UI. Plain ES module, no build step, no dependencies.
-// Talks only to the local server that served this page.
+// ContextDeck UI: a calm board for chaotic context.
+// Plain ES module, no build step, no dependencies. Talks only to the local
+// server that served this page.
 
 const TOKEN = document.querySelector('meta[name="contextdeck-token"]')?.getAttribute('content') ?? '';
 
-// ── Small helpers ─────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────
 
 const $ = (sel, root = document) => root.querySelector(sel);
+const SVG = 'http://www.w3.org/2000/svg';
 
 /** Build an element. Strings become text nodes, so session text can never inject markup. */
 function h(tag, attrs = {}, ...children) {
@@ -13,9 +15,8 @@ function h(tag, attrs = {}, ...children) {
   for (const [k, v] of Object.entries(attrs ?? {})) {
     if (v == null || v === false) continue;
     if (k === 'class') el.className = v;
-    else if (k === 'text') el.textContent = v;
     else if (k === 'dataset') Object.assign(el.dataset, v);
-    else if (k === 'style') Object.assign(el.style, v);
+    else if (k === 'style') for (const [p, val] of Object.entries(v)) el.style.setProperty(p, val);
     else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v);
     else el.setAttribute(k, v === true ? '' : String(v));
   }
@@ -26,7 +27,13 @@ function h(tag, attrs = {}, ...children) {
   return el;
 }
 
-const store = {
+function s(tag, attrs = {}) {
+  const el = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs)) if (v != null) el.setAttribute(k, String(v));
+  return el;
+}
+
+const prefs = {
   get(key, fallback) {
     try {
       const v = localStorage.getItem(`contextdeck.${key}`);
@@ -39,7 +46,7 @@ const store = {
     try {
       localStorage.setItem(`contextdeck.${key}`, JSON.stringify(value));
     } catch {
-      /* private mode etc. */
+      /* storage can be unavailable; preferences are optional */
     }
   },
 };
@@ -58,50 +65,43 @@ async function api(path, { method = 'GET', body } = {}) {
   return data;
 }
 
-function hashString(s) {
-  let h1 = 2166136261;
-  for (let i = 0; i < s.length; i++) h1 = Math.imul(h1 ^ s.charCodeAt(i), 16777619);
-  return h1 >>> 0;
-}
-
-/** Deterministic pseudo-random in [-1, 1] for a key, so the mess is the same mess every time. */
-function wobble(key) {
-  let t = hashString(key) + 0x6d2b79f5;
-  t = Math.imul(t ^ (t >>> 15), t | 1);
-  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-  return (((t ^ (t >>> 14)) >>> 0) / 4294967296) * 2 - 1;
+/** Deterministic pseudo-random in [0, 1) for a key, so the mess is the same mess every time. */
+function rand(key) {
+  let x = 2166136261;
+  for (let i = 0; i < key.length; i++) x = Math.imul(x ^ key.charCodeAt(i), 16777619);
+  x = Math.imul(x ^ (x >>> 15), x | 1);
+  x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
+  return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
 }
 
 const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
 
 function ago(iso) {
   if (!iso) return '';
-  const s = (Date.now() - Date.parse(iso)) / 1000;
-  if (s < 90) return 'now';
-  const m = Math.round(s / 60);
+  const sec = (Date.now() - Date.parse(iso)) / 1000;
+  if (sec < 90) return 'now';
+  const m = Math.round(sec / 60);
   if (m < 60) return `${m}m`;
   const hr = Math.round(m / 60);
-  if (hr < 24) return `${hr}h`;
+  if (hr < 48) return `${hr}h`;
   const d = Math.round(hr / 24);
-  if (d < 7) return `${d}d`;
-  const date = new Date(iso);
-  const sameYear = date.getFullYear() === new Date().getFullYear();
-  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', ...(sameYear ? {} : { year: 'numeric' }) });
+  if (d < 30) return `${d}d`;
+  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
 function agoLong(iso) {
   if (!iso) return 'unknown';
-  const s = (Date.parse(iso) - Date.now()) / 1000;
-  const abs = Math.abs(s);
+  const sec = (Date.parse(iso) - Date.now()) / 1000;
+  const abs = Math.abs(sec);
   if (abs < 60) return 'just now';
-  if (abs < 3600) return rtf.format(Math.round(s / 60), 'minute');
-  if (abs < 86400) return rtf.format(Math.round(s / 3600), 'hour');
-  if (abs < 86400 * 30) return rtf.format(Math.round(s / 86400), 'day');
+  if (abs < 3600) return rtf.format(Math.round(sec / 60), 'minute');
+  if (abs < 86400 * 2) return rtf.format(Math.round(sec / 3600), 'hour');
+  if (abs < 86400 * 30) return rtf.format(Math.round(sec / 86400), 'day');
   return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
 }
 
 function fullDate(iso) {
-  return iso ? new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '';
+  return iso ? new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'unknown';
 }
 
 function tokens(n) {
@@ -111,55 +111,70 @@ function tokens(n) {
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-function plural(n, one, many = `${one}s`) {
-  return `${n} ${n === 1 ? one : many}`;
-}
-
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const TIMES = ['never', 'once', 'twice'];
 const times = (n) => TIMES[n] ?? `${n} times`;
+const uniq = (a) => [...new Set(a)];
+
+/** Shorten long titles at a word boundary, as cards only have room for three lines. */
+function shortTitle(t, max = 70) {
+  if (t.length <= max) return t;
+  return t.slice(0, max - 3).replace(/\s+\S*$/, '') + '…';
+}
 
 /**
  * How full a session's context window is.
  * Claude Code doesn't record its window size, so it is estimated (200k, or 1M
- * once a session has gone past 200k) and marked as an estimate.
+ * once a session has gone past 200k) and shown with a "~".
  */
-function contextOf(s) {
-  if (!s.contextTokens) return null;
-  let win = s.contextWindow;
+function contextOf(sess) {
+  if (!sess.contextTokens) return null;
+  let win = sess.contextWindow;
   let estimated = false;
-  if (!win && s.provider === 'claude-code') {
-    win = s.contextTokens > 200_000 ? 1_000_000 : 200_000;
+  if (!win && sess.provider === 'claude-code') {
+    win = sess.contextTokens > 200_000 ? 1_000_000 : 200_000;
     estimated = true;
   }
-  if (!win) return { tokens: s.contextTokens, window: null, pct: null, estimated, hot: false };
-  const pct = Math.min(1, s.contextTokens / win);
-  return { tokens: s.contextTokens, window: win, pct, estimated, hot: pct >= 0.8 };
+  if (!win) return { tokens: sess.contextTokens, window: null, pct: null, estimated };
+  return { tokens: sess.contextTokens, window: win, pct: Math.min(1, sess.contextTokens / win), estimated };
 }
 
-const pctText = (c) => `${Math.round(c.pct * 100)}%`;
+const pctOf = (c) => Math.round((c?.pct ?? 0) * 100);
+
+/** Show a file relative to the session's folder when it is inside it. */
+function shortPath(file, cwd) {
+  if (!cwd) return file;
+  const base = cwd.replace(/[\\/]+$/, '');
+  for (const sep of ['/', '\\']) if (file.startsWith(base + sep)) return file.slice(base.length + 1);
+  return file;
+}
 
 // ── State ─────────────────────────────────────────────────────────────────
 
-const CARD_W = 240;
-const CARD_H = 150;
-const GAP = 24;
-const PAD = 26;
-const LABEL_H = 96;
-const ZONE_GAP = 72;
+// Geometry from the design
+const CW = 208;
+const CH = 132;
+const GAP = 14;
+const PADX = 22;
+const HEAD = 78;
+const PADB = 24;
+const GX = 84;
+const GY = 100;
+const HOUR = 3_600_000;
 
 const state = {
   board: null,
   byId: new Map(),
   layout: { version: 1, positions: { workstream: {}, project: {}, tool: {}, day: {} } },
-  view: store.get('view', window.innerWidth < 720 ? 'list' : 'canvas'),
-  grouping: store.get('grouping', 'workstream'),
-  hiddenTools: new Set(store.get('hiddenTools', [])),
-  showTools: store.get('showTools', false),
-  listSort: 'updated',
+  view: prefs.get('view', window.innerWidth < 720 ? 'list' : 'canvas'),
+  grouping: prefs.get('grouping', 'workstream'),
+  arrangement: prefs.get('arrangement', 'scatter'), // 'scatter' | 'tidy'
+  hiddenTools: new Set(prefs.get('hiddenTools', [])),
+  showTools: prefs.get('showTools', false),
   selected: null,
   detail: null,
-  search: null,
-  cam: { x: 40, y: 40, k: 1 },
+  search: null, // { q, ids:Set, order:Map } when searching
+  cam: { x: 32, y: 30, k: 0.7 },
   pos: new Map(),
   groups: [],
   hovered: null,
@@ -168,22 +183,22 @@ const state = {
 };
 
 const els = {
-  desk: $('#canvas'),
+  board: $('#canvas'),
   world: $('#world'),
-  cards: $('#cards'),
+  glows: $('#glows'),
   zones: $('#zones'),
-  edges: $('#edges'),
+  threads: $('#threads'),
+  cards: $('#cards'),
   empty: $('#empty'),
   list: $('#list'),
-  results: $('#results'),
   reader: $('#reader'),
   q: $('#q'),
-  status: $('#status-text'),
+  count: $('#count'),
   toast: $('#toast'),
-  tidy: $('#tidy'),
   zoomLevel: $('#zoom-reset'),
-  toolFilters: $('#tool-filters'),
-  grouping: $('#grouping'),
+  layoutToggle: $('#layout-toggle'),
+  chips: $('#tool-filters'),
+  rescan: $('#rescan'),
 };
 
 let toastTimer = 0;
@@ -195,112 +210,119 @@ function toast(message) {
 }
 
 const toolLabel = (id) => state.board?.providers.find((p) => p.id === id)?.label ?? id;
-const toolName = (id, extra = {}) => h('span', { class: 'tool-name', dataset: { tool: id }, ...extra }, toolLabel(id));
-const visibleSessions = () => (state.board?.sessions ?? []).filter((s) => !state.hiddenTools.has(s.provider));
+const swatch = (tool) => h('span', { class: 'swatch', dataset: { tool }, 'aria-hidden': 'true' });
 
-// ── Grouping and layout ───────────────────────────────────────────────────
-
-function dayLabel(iso) {
-  if (!iso) return 'Unknown date';
-  const d = new Date(iso);
-  const today = new Date();
-  const start = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-  const diff = Math.round((start(today) - start(d)) / 86400000);
-  if (diff === 0) return 'Today';
-  if (diff === 1) return 'Yesterday';
-  return d.toLocaleDateString(undefined, {
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-    ...(d.getFullYear() === today.getFullYear() ? {} : { year: 'numeric' }),
-  });
+function visibleSessions() {
+  return (state.board?.sessions ?? []).filter(
+    (x) => !state.hiddenTools.has(x.provider) && (!state.search || state.search.ids.has(x.id)),
+  );
 }
 
-function buildGroups() {
-  const visible = visibleSessions();
-  const ids = new Set(visible.map((s) => s.id));
-  const byUpdated = (a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? '');
+// ── Grouping ──────────────────────────────────────────────────────────────
+
+function dayKey(iso) {
+  if (!iso) return 'unknown';
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function dayLabel(iso) {
+  if (!iso) return 'Unknown day';
+  const d = new Date(iso);
+  const start = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((start(new Date()) - start(d)) / 86_400_000);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+}
+
+function buildGroups(sessions) {
+  const ids = new Set(sessions.map((x) => x.id));
+  const newest = (a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? '');
   const groups = [];
 
   if (state.grouping === 'workstream') {
     for (const w of state.board.workstreams) {
-      const members = w.sessionIds.filter((id) => ids.has(id)).map((id) => state.byId.get(id));
-      if (!members.length) continue;
-      const tools = [...new Set(members.map((m) => m.provider))];
+      const items = w.sessionIds.filter((id) => ids.has(id)).map((id) => state.byId.get(id)).sort(newest);
+      if (!items.length) continue;
+      const linked = w.kind === 'linked';
+      const tools = uniq(items.map((x) => toolLabel(x.provider)));
       groups.push({
-        id: w.id,
-        kind: w.kind,
-        label: w.kind === 'linked' ? w.label : w.label,
-        sub:
-          w.kind === 'linked'
-            ? [w.project && h('span', {}, w.project), w.branch && h('code', {}, w.branch), tools.length > 1 ? h('span', {}, `${tools.map(toolLabel).join(' and ')}`) : null]
-            : [h('span', {}, members.length === 1 ? 'Not linked to other sessions' : 'Not linked to each other')],
-        members: members.sort(byUpdated),
+        key: w.id,
+        title: w.label,
+        meta: linked
+          ? [w.project, w.branch, tools.join(' + ')].filter(Boolean).join(' · ')
+          : items.length === 1
+            ? 'Not linked to other sessions'
+            : 'Not linked to each other',
+        boxed: linked,
+        quiet: !linked,
+        items,
       });
     }
-  } else {
-    const keyOf = {
-      project: (s) => s.cwd ?? '',
-      tool: (s) => s.provider,
-      day: (s) => (s.updatedAt ? new Date(s.updatedAt).toDateString() : ''),
-    }[state.grouping];
-    const map = new Map();
-    for (const s of visible) {
-      const k = keyOf(s);
-      if (!map.has(k)) map.set(k, []);
-      map.get(k).push(s);
-    }
-    for (const [k, members] of map) {
-      members.sort(byUpdated);
-      const first = members[0];
-      let label;
-      let sub;
-      if (state.grouping === 'project') {
-        label = first.project ?? 'No project';
-        sub = [k && h('code', {}, k), h('span', {}, plural(members.length, 'session'))];
-      } else if (state.grouping === 'tool') {
-        label = toolLabel(k);
-        sub = [h('span', {}, plural(members.length, 'session'))];
-      } else {
-        label = dayLabel(first.updatedAt);
-        sub = [h('span', {}, plural(members.length, 'session'))];
-      }
-      groups.push({ id: `${state.grouping}:${k}`, kind: state.grouping === 'project' ? 'loose' : 'loose', label, sub, members });
-    }
-    groups.sort((a, b) => byUpdated(a.members[0], b.members[0]));
+    return groups;
   }
-  return groups;
+
+  const keyOf = { project: (x) => x.cwd ?? '', tool: (x) => x.provider, day: (x) => dayKey(x.updatedAt) }[state.grouping];
+  const map = new Map();
+  for (const x of sessions) {
+    const k = keyOf(x);
+    if (!map.has(k)) map.set(k, []);
+    map.get(k).push(x);
+  }
+  for (const [k, items] of map) {
+    items.sort(newest);
+    const n = plural(items.length, 'session');
+    const projects = uniq(items.map((x) => x.project ?? 'no project')).length;
+    let title;
+    let meta;
+    if (state.grouping === 'project') {
+      const branches = uniq(items.map((x) => x.gitBranch).filter(Boolean)).length;
+      title = items[0].project ?? 'No project';
+      meta = branches ? `${n} · ${plural(branches, 'branch', 'branches')}` : n;
+    } else if (state.grouping === 'tool') {
+      title = toolLabel(k);
+      meta = `${n} · ${plural(projects, 'project')}`;
+    } else {
+      title = dayLabel(items[0].updatedAt);
+      meta = `${n} · ${plural(projects, 'project')}`;
+    }
+    groups.push({ key: `${state.grouping}:${k}`, title, meta, boxed: true, quiet: false, items });
+  }
+  return groups.sort((a, b) => newest(a.items[0], b.items[0]));
 }
 
-/**
- * Rough width a zone needs for its title (40px heavy) and its caption
- * (19px when zoomed out), so zones are never narrower than their labels.
- */
-function labelWidth(g) {
-  const caption = g.sub
-    .filter(Boolean)
-    .map((n) => n.textContent)
-    .join('    ');
-  return Math.min(760, Math.max(g.label.length * 21, caption.length * 9.5) + 2 * PAD);
+// ── Canvas layout ─────────────────────────────────────────────────────────
+
+/** Width a group needs for its title (17px caps, tracked) and meta (12px mono). */
+function headWidth(g) {
+  return Math.max(g.title.length * 12.6, Math.min(g.meta.length * 7.3, 520)) + 2 * PADX;
 }
 
 function layout() {
-  const groups = buildGroups();
-  const manual = state.layout.positions[state.grouping] ?? {};
-  const desk = els.desk.getBoundingClientRect();
+  const sessions = visibleSessions();
+  const groups = buildGroups(sessions);
+  const scatter = state.arrangement === 'scatter';
+  const manual = scatter ? (state.layout.positions[state.grouping] ?? {}) : {};
+  const perRow = state.grouping === 'workstream' ? 3 : 4;
 
-  // Size each zone
   for (const g of groups) {
-    const n = g.members.length;
-    const cols = n <= 3 ? n : n <= 8 ? 3 : 4;
-    const rows = Math.ceil(n / cols);
-    g.cols = cols;
-    g.w = Math.max(cols * CARD_W + (cols - 1) * GAP + 2 * PAD, labelWidth(g));
-    g.h = LABEL_H + rows * CARD_H + (rows - 1) * GAP + PAD;
+    const n = g.items.length;
+    const cols = Math.min(perRow, n);
+    const rows = Math.ceil(n / perRow);
+    g.cols = perRow;
+    g.w = Math.max(268, cols * CW + (cols - 1) * GAP + 2 * PADX, headWidth(g));
+    g.h = HEAD + rows * CH + (rows - 1) * GAP + PADB;
+    // Scatter: each group drifts a little, the same way every time
+    g.jx = scatter ? Math.round(rand(`${g.key}x`) * 52) : 0;
+    g.jy = scatter ? Math.round((rand(`${g.key}y`) - 0.5) * 80) + 40 : 0;
   }
 
-  // Shelf-pack zones into rows. Try many row widths and keep the one whose
-  // overall shape best matches the screen, so "show everything" is as large as possible.
+  // Shelf-pack groups into rows. Try many row widths and keep the one whose
+  // shape best fits the screen, so the whole board is as large as possible.
+  const rect = els.board.getBoundingClientRect();
+  const viewW = Math.max(320, (rect.width || 1280) - 64);
+  const viewH = Math.max(320, (rect.height || 800) - 110);
   const pack = (rowMax) => {
     let x = 0;
     let y = 0;
@@ -308,152 +330,130 @@ function layout() {
     let width = 0;
     const spots = [];
     for (const g of groups) {
-      if (x > 0 && x + g.w > rowMax) {
+      const w = g.w + g.jx;
+      if (x > 0 && x + w > rowMax) {
         x = 0;
-        y += rowH + ZONE_GAP;
+        y += rowH + GY;
         rowH = 0;
       }
-      spots.push({ x, y });
-      width = Math.max(width, x + g.w);
-      x += g.w + ZONE_GAP;
-      rowH = Math.max(rowH, g.h);
+      spots.push({ x: x + g.jx, y: y + g.jy });
+      width = Math.max(width, x + w);
+      x += w + GX;
+      rowH = Math.max(rowH, g.h + g.jy);
     }
     return { spots, width, height: y + rowH };
   };
-  const viewW = Math.max(320, (desk.width || 1200) - 48);
-  const viewH = Math.max(320, (desk.height || 800) - 100);
   let best = null;
-  const widest = groups.reduce((m, g) => Math.max(m, g.w), 0);
+  const widest = groups.reduce((m, g) => Math.max(m, g.w + g.jx), 0);
   for (let rowMax = widest; rowMax <= widest + 8000; rowMax += 120) {
     const p = pack(rowMax);
     const scale = Math.min(viewW / p.width, viewH / p.height);
     if (!best || scale > best.scale + 1e-6) best = { ...p, scale };
   }
 
-  // Place cards inside their zones with a little wobble
   state.pos = new Map();
   groups.forEach((g, gi) => {
     const { x, y } = best?.spots[gi] ?? { x: 0, y: 0 };
     g.x = x;
     g.y = y;
-    g.members.forEach((s, i) => {
+    g.items.forEach((item, i) => {
       const c = i % g.cols;
       const r = Math.floor(i / g.cols);
       const auto = {
-        x: x + PAD + c * (CARD_W + GAP) + wobble(`${s.id}x`) * 7,
-        y: y + LABEL_H + r * (CARD_H + GAP) + wobble(`${s.id}y`) * 7,
+        x: x + PADX + c * (CW + GAP),
+        y: y + HEAD + r * (CH + GAP) + (scatter ? Math.round((rand(`${item.id}j`) - 0.5) * 12) : 0),
       };
-      state.pos.set(s.id, manual[s.id] ?? auto);
+      state.pos.set(item.id, manual[item.id] ?? auto);
     });
   });
   state.groups = groups;
-  els.tidy.disabled = Object.keys(manual).length === 0;
 }
 
-/** Zones stretch around wherever their cards actually are, including cards you dragged away. */
-function zoneRect(g) {
+/** Groups stretch around wherever their cards actually are, including cards you dragged away. */
+function groupRect(g) {
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
   let maxY = -Infinity;
-  for (const s of g.members) {
-    const p = state.pos.get(s.id);
+  for (const item of g.items) {
+    const p = state.pos.get(item.id);
     minX = Math.min(minX, p.x);
     minY = Math.min(minY, p.y);
-    maxX = Math.max(maxX, p.x + CARD_W);
-    maxY = Math.max(maxY, p.y + CARD_H);
+    maxX = Math.max(maxX, p.x + CW);
+    maxY = Math.max(maxY, p.y + CH);
   }
-  return {
-    x: minX - PAD,
-    y: minY - LABEL_H,
-    w: Math.max(maxX - minX + 2 * PAD, labelWidth(g)),
-    h: maxY - minY + LABEL_H + PAD,
-  };
+  const x = minX - PADX;
+  const y = minY - HEAD;
+  return { x, y, w: Math.max(maxX + PADX - x, headWidth(g), 268), h: maxY + PADB - y };
 }
 
 // ── Canvas rendering ──────────────────────────────────────────────────────
 
 const cardEls = new Map();
 
-function cardContent(s) {
-  const ctx = contextOf(s);
-  const fill = h('div', { class: 'fill', 'aria-hidden': 'true' });
-  if (ctx?.pct != null) {
-    fill.style.height = `${Math.max(3, ctx.pct * 100)}%`;
-    if (ctx.estimated) fill.classList.add('estimate');
-    if (ctx.hot) fill.classList.add('hot');
-    for (let i = 1; i <= s.compactions; i++) {
-      fill.append(h('i', { style: { bottom: `${(i / (s.compactions + 1)) * 100}%` } }));
-    }
-  } else {
-    fill.style.display = 'none';
+function cardChildren(item) {
+  const ctx = contextOf(item);
+  const fillPx = ctx?.pct != null ? Math.round(CH * ctx.pct) : 0;
+  const fill = h('span', { class: 'fill', 'aria-hidden': 'true', style: { height: `${fillPx}px` } });
+  for (let i = 1; i <= item.compactions && fillPx; i++) {
+    fill.append(h('i', { style: { bottom: `${Math.round((fillPx * i) / (item.compactions + 1))}px` } }));
   }
-  const helpers = state.board.subagentCounts[s.id];
-  const ageText = ago(s.updatedAt);
+  const helpers = state.board.subagentCounts[item.id];
+  const age = ago(item.updatedAt);
   return [
     fill,
     h(
-      'div',
-      { class: 'card-top' },
-      toolName(s.provider),
-      h('span', { class: `age${ageText === 'now' ? ' live' : ''}`, title: fullDate(s.updatedAt) }, ageText),
-    ),
-    h('p', { class: 'card-title', title: s.title }, s.title),
-    h(
-      'div',
-      { class: 'card-foot' },
-      h('span', { class: 'proj' }, s.project ?? 'No project', helpers ? h('span', { class: 'helpers' }, `  +${plural(helpers, 'subagent')}`) : null),
-      ctx
-        ? h(
-            'span',
-            { class: `pct${ctx.hot ? ' hot' : ''}`, title: ctx.pct != null ? `${tokens(ctx.tokens)} of ${tokens(ctx.window)} tokens${ctx.estimated ? ' (window estimated)' : ''}` : `${tokens(ctx.tokens)} tokens` },
-            ctx.pct != null ? pctText(ctx) : tokens(ctx.tokens),
-          )
-        : null,
+      'span',
+      { class: 'inner' },
+      h('span', { class: 'top' }, swatch(item.provider), h('span', { class: `age${age === 'now' ? ' now' : ''}` }, age)),
+      h('span', { class: 'title' }, shortTitle(item.title)),
+      h(
+        'span',
+        { class: 'foot' },
+        helpers ? h('span', { class: 'helpers' }, `+${plural(helpers, 'subagent')}`) : null,
+        ctx ? h('span', { class: 'pct' }, ctx.pct != null ? `${pctOf(ctx)}%` : tokens(ctx.tokens)) : null,
+      ),
     ),
   ];
 }
 
-function cardLabel(s) {
-  const ctx = contextOf(s);
+function cardLabel(item) {
+  const ctx = contextOf(item);
   return [
-    s.title,
-    `${toolLabel(s.provider)}, ${s.project ?? 'no project'}`,
-    `updated ${agoLong(s.updatedAt)}`,
-    ctx?.pct != null ? `context ${pctText(ctx)} full` : '',
+    item.title,
+    `${toolLabel(item.provider)}, ${item.project ?? 'no project'}`,
+    `updated ${agoLong(item.updatedAt)}`,
+    ctx?.pct != null ? `context ${pctOf(ctx)}% full${item.compactions ? `, compacted ${times(item.compactions)}` : ''}` : '',
   ]
     .filter(Boolean)
     .join('. ');
 }
 
 function renderCanvas() {
-  const sessions = visibleSessions();
+  const scatter = state.arrangement === 'scatter';
   const seen = new Set();
-  for (const s of sessions) {
-    seen.add(s.id);
-    let el = cardEls.get(s.id);
-    const sig = `${s.updatedAt}|${s.title}|${s.contextTokens}|${s.compactions}|${state.board.subagentCounts[s.id] ?? 0}`;
-    if (!el) {
-      el = h('div', {
-        class: 'card',
-        role: 'button',
-        tabindex: '0',
-        dataset: { id: s.id, tool: s.provider },
-        style: { '--tilt': `${(wobble(s.id) * 1.8).toFixed(2)}deg` },
-      });
-      attachCardEvents(el);
-      cardEls.set(s.id, el);
-      els.cards.append(el);
+  for (const g of state.groups) {
+    for (const item of g.items) {
+      seen.add(item.id);
+      let el = cardEls.get(item.id);
+      const sig = `${item.updatedAt}|${item.title}|${item.contextTokens}|${item.compactions}|${state.board.subagentCounts[item.id] ?? 0}`;
+      if (!el) {
+        el = h('button', { type: 'button', class: 'card', dataset: { id: item.id, tool: item.provider } });
+        attachCardEvents(el);
+        cardEls.set(item.id, el);
+        els.cards.append(el);
+      }
+      if (el.dataset.sig !== sig) {
+        el.replaceChildren(...cardChildren(item));
+        el.dataset.sig = sig;
+        el.setAttribute('aria-label', cardLabel(item));
+      }
+      const p = state.pos.get(item.id);
+      el.style.translate = `${p.x}px ${p.y}px`;
+      el.style.setProperty('--tilt', scatter ? `${((rand(`${item.id}r`) - 0.5) * 3.4).toFixed(2)}deg` : '0deg');
+      el.classList.toggle('selected', state.selected === item.id);
+      el.setAttribute('aria-pressed', String(state.selected === item.id));
     }
-    if (el.dataset.sig !== sig) {
-      el.replaceChildren(...cardContent(s));
-      el.dataset.sig = sig;
-      el.setAttribute('aria-label', cardLabel(s));
-    }
-    const p = state.pos.get(s.id);
-    el.style.transform = `translate(${p.x}px, ${p.y}px)`;
-    el.classList.toggle('selected', state.selected === s.id);
-    el.classList.toggle('hit', !!state.search?.ids.has(s.id));
   }
   for (const [id, el] of cardEls) {
     if (!seen.has(id)) {
@@ -461,81 +461,80 @@ function renderCanvas() {
       cardEls.delete(id);
     }
   }
-  els.desk.classList.toggle('searching', !!state.search);
-  renderZones();
-  renderEdges();
-  renderEmpty();
+  renderGroups();
+  renderThreads();
+  renderEmpty(els.empty);
+  els.layoutToggle.textContent = scatter ? 'Tidy up' : 'Scatter';
+  els.layoutToggle.title = scatter ? 'Line every card up in a neat grid' : 'Go back to the loose layout and the cards you placed';
 }
 
-function renderZones() {
+function renderGroups() {
+  const now = Date.now();
+  const glows = [];
   els.zones.replaceChildren(
     ...state.groups.map((g) => {
-      const r = zoneRect(g);
+      const r = groupRect(g);
+      const active = g.items.some((x) => x.updatedAt && now - Date.parse(x.updatedAt) < HOUR);
+      if (active) glows.push(h('div', { class: 'glow', style: { left: `${r.x + r.w - 300}px`, top: `${r.y - 190}px` } }));
       return h(
         'div',
         {
-          class: `zone ${g.kind}`,
+          class: `zone${g.boxed ? ' boxed' : ''}${g.quiet ? ' quiet' : ''}`,
           style: { transform: `translate(${r.x}px, ${r.y}px)`, width: `${r.w}px`, height: `${r.h}px` },
         },
-        h(
-          'div',
-          { class: 'zone-label' },
-          h('h2', { class: 'zone-title', title: g.label }, g.label),
-          h('div', { class: 'zone-sub' }, g.sub),
-        ),
+        h('div', { class: 'zone-head' }, h('h2', { class: 'zone-title', title: g.title }, g.title), h('div', { class: 'zone-meta', title: g.meta }, g.meta)),
       );
     }),
   );
+  els.glows.replaceChildren(...glows);
 }
 
-function renderEdges() {
-  const ns = 'http://www.w3.org/2000/svg';
+/** S-curves between sessions that edited the same files. */
+function renderThreads() {
   const focus = state.hovered ?? state.selected;
   const paths = [];
   for (const e of state.board?.edges ?? []) {
     const a = state.pos.get(e.a);
     const b = state.pos.get(e.b);
     if (!a || !b) continue;
-    const ax = a.x + CARD_W / 2;
-    const ay = a.y + CARD_H / 2;
-    const bx = b.x + CARD_W / 2;
-    const by = b.y + CARD_H / 2;
+    const ax = a.x + CW / 2;
+    const ay = a.y + CH / 2;
+    const bx = b.x + CW / 2;
+    const by = b.y + CH / 2;
     const dx = bx - ax;
     const dy = by - ay;
-    const bend = 0.18;
-    const cx = (ax + bx) / 2 - dy * bend;
-    const cy = (ay + by) / 2 + dx * bend;
-    const p = document.createElementNS(ns, 'path');
-    p.setAttribute('d', `M${ax.toFixed(1)} ${ay.toFixed(1)} Q${cx.toFixed(1)} ${cy.toFixed(1)} ${bx.toFixed(1)} ${by.toFixed(1)}`);
-    if (focus && (e.a === focus || e.b === focus)) p.classList.add('on');
-    paths.push(p);
+    const d =
+      Math.abs(dx) >= Math.abs(dy)
+        ? `M${ax},${ay} C${ax + dx / 2},${ay} ${bx - dx / 2},${by} ${bx},${by}`
+        : `M${ax},${ay} C${ax},${ay + dy / 2} ${bx},${by - dy / 2} ${bx},${by}`;
+    paths.push(s('path', { d, class: focus && (e.a === focus || e.b === focus) ? 'on' : null }));
   }
-  els.edges.replaceChildren(...paths);
+  els.threads.replaceChildren(...paths);
 }
 
-function renderEmpty() {
+function renderEmpty(target) {
   const total = state.board?.sessions.length ?? 0;
-  const visible = visibleSessions().length;
-  if (total > 0 && visible > 0) {
-    els.empty.hidden = true;
+  if (visibleSessions().length > 0) {
+    target.hidden = true;
     return;
   }
-  els.empty.hidden = false;
+  target.hidden = false;
+  target.classList.toggle('interactive', total === 0);
   if (total === 0) {
-    const where = (state.board?.sources ?? []).map((src) =>
-      h('li', {}, `${src.label}: `, h('code', {}, src.root)),
-    );
-    els.empty.replaceChildren(
-      h('h2', {}, 'No sessions found yet'),
-      h('p', {}, 'ContextDeck looked for sessions in these folders:'),
-      h('ul', {}, where),
-      h('p', {}, 'Use Claude Code or Codex for a bit, then choose Rescan. To see exactly what was found, run ', h('code', {}, 'contextdeck doctor'), ' in your terminal.'),
+    target.replaceChildren(
+      h('h2', {}, 'No sessions yet'),
+      h(
+        'p',
+        {},
+        'ContextDeck looked in ',
+        (state.board?.sources ?? []).flatMap((src, i, all) => [h('code', {}, src.root), i < all.length - 1 ? ' and ' : '']),
+        '. Use Claude Code or Codex, then choose Rescan. ',
+        h('code', {}, 'contextdeck doctor'),
+        ' shows what was found.',
+      ),
     );
   } else {
-    els.empty.replaceChildren(
-      h('h2', {}, 'Every tool is hidden'),
-      h('p', {}, 'Turn a tool back on in the bar at the top to see its sessions.'),
-    );
+    target.replaceChildren(h('h2', {}, 'Nothing matches'), h('p', {}, 'Try another word, or turn a tool back on.'));
   }
 }
 
@@ -544,26 +543,26 @@ function renderEmpty() {
 function applyCam() {
   const { x, y, k } = state.cam;
   els.world.style.transform = `translate(${x}px, ${y}px) scale(${k})`;
-  els.desk.style.backgroundSize = `${24 * k}px ${24 * k}px`;
-  els.desk.style.backgroundPosition = `${x}px ${y}px`;
-  els.desk.classList.toggle('far', k < 0.62);
+  els.board.style.backgroundSize = `${22 * k}px ${22 * k}px`;
+  els.board.style.backgroundPosition = `${x}px ${y}px`;
+  els.board.classList.toggle('far', k < 0.48);
   els.zoomLevel.textContent = `${Math.round(k * 100)}%`;
 }
 
 function zoomAt(factor, cx, cy) {
   const { x, y, k } = state.cam;
-  const nk = Math.min(1.8, Math.max(0.15, k * factor));
+  const nk = Math.min(1.6, Math.max(0.2, k * factor));
   state.cam = { k: nk, x: cx - ((cx - x) * nk) / k, y: cy - ((cy - y) * nk) / k };
   applyCam();
 }
 
-function worldBounds() {
+function bounds() {
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
   let maxY = -Infinity;
   for (const g of state.groups) {
-    const r = zoneRect(g);
+    const r = groupRect(g);
     minX = Math.min(minX, r.x);
     minY = Math.min(minY, r.y);
     maxX = Math.max(maxX, r.x + r.w);
@@ -572,19 +571,21 @@ function worldBounds() {
   return Number.isFinite(minX) ? { minX, minY, maxX, maxY } : null;
 }
 
+/** Show everything if it fits at a readable size; otherwise start at the top left. */
 function fit() {
-  const b = worldBounds();
-  const rect = els.desk.getBoundingClientRect();
+  const b = bounds();
+  const rect = els.board.getBoundingClientRect();
   if (!b || !rect.width) return;
-  const left = state.search && !els.results.hidden ? 392 : 24;
-  const right = !els.reader.hidden && rect.width > 900 ? 500 : 24;
-  const w = rect.width - left - right;
-  const hgt = rect.height - 24 - 76;
-  const k = Math.min(1, Math.max(0.15, Math.min(w / (b.maxX - b.minX), hgt / (b.maxY - b.minY))));
+  const right = !els.reader.hidden && rect.width > 900 ? 460 : 32;
+  const w = rect.width - 32 - right;
+  const hgt = rect.height - 30 - 90;
+  const want = Math.min(w / (b.maxX - b.minX), hgt / (b.maxY - b.minY));
+  const k = Math.min(1, Math.max(0.42, want));
+  const fits = want >= 0.42;
   state.cam = {
     k,
-    x: left + (w - (b.maxX - b.minX) * k) / 2 - b.minX * k,
-    y: 24 + (hgt - (b.maxY - b.minY) * k) / 2 - b.minY * k,
+    x: fits ? 32 + (w - (b.maxX - b.minX) * k) / 2 - b.minX * k : 32 - b.minX * k,
+    y: fits ? 30 + (hgt - (b.maxY - b.minY) * k) / 2 - b.minY * k : 30 - b.minY * k,
   };
   applyCam();
 }
@@ -592,15 +593,10 @@ function fit() {
 function centerOn(id) {
   const p = state.pos.get(id);
   if (!p) return;
-  const rect = els.desk.getBoundingClientRect();
-  const right = !els.reader.hidden && rect.width > 900 ? 480 : 0;
-  const left = state.search && !els.results.hidden && rect.width > 720 ? 376 : 0;
-  const k = Math.max(state.cam.k, 0.75);
-  state.cam = {
-    k,
-    x: left + (rect.width - left - right) / 2 - (p.x + CARD_W / 2) * k,
-    y: rect.height / 2 - (p.y + CARD_H / 2) * k,
-  };
+  const rect = els.board.getBoundingClientRect();
+  const right = !els.reader.hidden && rect.width > 900 ? 440 : 0;
+  const k = Math.max(state.cam.k, 0.7);
+  state.cam = { k, x: (rect.width - right) / 2 - (p.x + CW / 2) * k, y: rect.height / 2 - (p.y + CH / 2) * k };
   applyCam();
 }
 
@@ -613,7 +609,7 @@ function saveLayoutSoon() {
     try {
       await api('/api/layout', { method: 'PUT', body: state.layout });
     } catch (err) {
-      toast(`Couldn't save where you put that card: ${err.message}`);
+      toast(`Couldn’t save where you put that card: ${err.message}`);
     }
   }, 400);
 }
@@ -623,46 +619,57 @@ function redrawSoon() {
   if (frame) return;
   frame = requestAnimationFrame(() => {
     frame = 0;
-    renderZones();
-    renderEdges();
+    renderGroups();
+    renderThreads();
   });
+}
+
+function setArrangement(next) {
+  state.arrangement = next;
+  prefs.set('arrangement', next);
 }
 
 function attachCardEvents(el) {
   let start = null;
+  let dragged = false;
   el.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     e.stopPropagation();
-    const id = el.dataset.id;
-    const p = state.pos.get(id);
-    start = { px: e.clientX, py: e.clientY, x: p.x, y: p.y, dragging: false };
+    const p = state.pos.get(el.dataset.id);
+    start = { px: e.clientX, py: e.clientY, x: p.x, y: p.y, moving: false };
+    dragged = false;
     el.setPointerCapture(e.pointerId);
   });
   el.addEventListener('pointermove', (e) => {
     if (!start) return;
     const dx = (e.clientX - start.px) / state.cam.k;
     const dy = (e.clientY - start.py) / state.cam.k;
-    if (!start.dragging && Math.hypot(dx, dy) * state.cam.k < 5) return;
-    start.dragging = true;
+    if (!start.moving && Math.hypot(dx, dy) * state.cam.k < 5) return;
+    if (!start.moving) {
+      start.moving = true;
+      // Moving a card by hand means you want the loose layout
+      if (state.arrangement === 'tidy') {
+        setArrangement('scatter');
+        els.layoutToggle.textContent = 'Tidy up';
+      }
+    }
     el.classList.add('lifted');
     const p = { x: Math.round(start.x + dx), y: Math.round(start.y + dy) };
     state.pos.set(el.dataset.id, p);
-    el.style.transform = `translate(${p.x}px, ${p.y}px)`;
+    el.style.translate = `${p.x}px ${p.y}px`;
     redrawSoon();
   });
   const end = () => {
     if (!start) return;
-    const wasDrag = start.dragging;
+    dragged = start.moving;
     start = null;
     el.classList.remove('lifted');
-    const id = el.dataset.id;
-    if (wasDrag) {
+    if (dragged) {
+      const id = el.dataset.id;
       state.layout.positions[state.grouping] ??= {};
       state.layout.positions[state.grouping][id] = state.pos.get(id);
-      els.tidy.disabled = false;
       saveLayoutSoon();
-    } else {
-      select(id);
+      renderCanvas();
     }
   };
   el.addEventListener('pointerup', end);
@@ -670,35 +677,37 @@ function attachCardEvents(el) {
     start = null;
     el.classList.remove('lifted');
   });
-  el.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' || e.key === ' ') {
+  el.addEventListener('click', (e) => {
+    if (dragged) {
+      dragged = false;
       e.preventDefault();
-      select(el.dataset.id);
+      return;
     }
+    select(el.dataset.id);
   });
   el.addEventListener('pointerenter', () => {
     state.hovered = el.dataset.id;
-    renderEdges();
+    renderThreads();
   });
   el.addEventListener('pointerleave', () => {
     state.hovered = null;
-    renderEdges();
+    renderThreads();
   });
 }
 
-(function attachDeskEvents() {
+(function attachBoardEvents() {
   let pan = null;
-  els.desk.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0 || e.target.closest('.card, .dock-left, .legend, .empty, .results')) return;
+  els.board.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.target.closest('.card, .dock, .legend, .empty.interactive')) return;
     pan = { px: e.clientX, py: e.clientY, x: state.cam.x, y: state.cam.y, moved: false };
-    els.desk.setPointerCapture(e.pointerId);
-    els.desk.classList.add('panning');
+    els.board.setPointerCapture(e.pointerId);
+    els.board.classList.add('panning');
   });
-  els.desk.addEventListener('pointermove', (e) => {
+  els.board.addEventListener('pointermove', (e) => {
     if (!pan) return;
     const dx = e.clientX - pan.px;
     const dy = e.clientY - pan.py;
-    if (Math.hypot(dx, dy) > 3) pan.moved = true;
+    if (Math.abs(dx) + Math.abs(dy) > 4) pan.moved = true;
     state.cam.x = pan.x + dx;
     state.cam.y = pan.y + dy;
     applyCam();
@@ -707,21 +716,20 @@ function attachCardEvents(el) {
     if (!pan) return;
     const clicked = !pan.moved;
     pan = null;
-    els.desk.classList.remove('panning');
+    els.board.classList.remove('panning');
     if (clicked && state.selected) closeReader();
   };
-  els.desk.addEventListener('pointerup', end);
-  els.desk.addEventListener('pointercancel', end);
-
-  els.desk.addEventListener(
+  els.board.addEventListener('pointerup', end);
+  els.board.addEventListener('pointercancel', end);
+  els.board.addEventListener(
     'wheel',
     (e) => {
-      if (e.target.closest('.results, .empty')) return;
+      if (e.target.closest('.legend')) return;
       e.preventDefault();
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
       if (e.ctrlKey || e.metaKey) {
-        const rect = els.desk.getBoundingClientRect();
-        zoomAt(Math.exp(-e.deltaY * unit * 0.0035), e.clientX - rect.left, e.clientY - rect.top);
+        const r = els.board.getBoundingClientRect();
+        zoomAt(Math.exp(-e.deltaY * unit * 0.0018), e.clientX - r.left, e.clientY - r.top);
       } else {
         state.cam.x -= e.deltaX * unit;
         state.cam.y -= e.deltaY * unit;
@@ -732,151 +740,66 @@ function attachCardEvents(el) {
   );
 
   const zoomCenter = (f) => {
-    const r = els.desk.getBoundingClientRect();
+    const r = els.board.getBoundingClientRect();
     zoomAt(f, r.width / 2, r.height / 2);
   };
-  $('#zoom-in').addEventListener('click', () => zoomCenter(1.25));
-  $('#zoom-out').addEventListener('click', () => zoomCenter(0.8));
+  $('#zoom-in').addEventListener('click', () => zoomCenter(1.15));
+  $('#zoom-out').addEventListener('click', () => zoomCenter(1 / 1.15));
   els.zoomLevel.addEventListener('click', fit);
-  els.tidy.addEventListener('click', () => {
-    state.layout.positions[state.grouping] = {};
-    saveLayoutSoon();
-    layout();
-    renderCanvas();
+  els.layoutToggle.addEventListener('click', () => {
+    setArrangement(state.arrangement === 'scatter' ? 'tidy' : 'scatter');
+    relayout();
     fit();
-    toast('Cards are back in their groups.');
   });
 })();
 
 // ── List view ─────────────────────────────────────────────────────────────
 
 function renderList() {
-  let rows = visibleSessions();
-  if (state.search) {
-    const rank = new Map(state.search.hits.map((hit, i) => [hit.session.id, i]));
-    rows = rows.filter((s) => rank.has(s.id)).sort((a, b) => rank.get(a.id) - rank.get(b.id));
-  } else if (state.listSort === 'context') {
-    rows.sort((a, b) => (contextOf(b)?.pct ?? -1) - (contextOf(a)?.pct ?? -1));
-  } else {
-    rows.sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
-  }
-
-  const sortButton = (key, label) =>
-    state.search
-      ? label
-      : h(
-          'button',
-          {
-            type: 'button',
-            'aria-sort': state.listSort === key ? 'descending' : null,
-            onclick: () => {
-              state.listSort = key;
-              renderList();
-            },
-          },
-          label,
-        );
-
-  if (!rows.length) {
-    els.list.replaceChildren(
-      h(
-        'div',
-        { class: 'sheet' },
-        h(
-          'p',
-          { class: 'list-empty' },
-          state.search
-            ? `Nothing matches “${state.search.q}”. Try fewer words, or end a word with * to match its start.`
-            : (state.board?.sessions.length ?? 0) === 0
-              ? 'No sessions found yet. Use Claude Code or Codex, then choose Rescan.'
-              : 'Every tool is hidden. Turn one back on in the bar at the top.',
-        ),
-      ),
-    );
-    return;
-  }
-
-  const body = rows.map((s) => {
-    const ctx = contextOf(s);
-    const hit = state.search?.hits.find((x) => x.session.id === s.id);
-    return h(
-      'tr',
-      {
-        tabindex: '0',
-        dataset: { id: s.id, tool: s.provider },
-        class: state.selected === s.id ? 'selected' : null,
-        onclick: () => select(s.id),
-        onkeydown: (e) => {
-          if (e.key === 'Enter') select(s.id);
+  const sessions = visibleSessions();
+  const groups = buildGroups(sessions);
+  const inner = h('div', { class: 'list-inner' });
+  for (const g of groups) {
+    const rows = g.items.map((item) => {
+      const ctx = contextOf(item);
+      return h(
+        'button',
+        {
+          type: 'button',
+          class: `row${state.selected === item.id ? ' selected' : ''}`,
+          dataset: { id: item.id, tool: item.provider },
+          'aria-pressed': String(state.selected === item.id),
+          onclick: () => select(item.id),
         },
-      },
-      h(
-        'td',
-        {},
-        h('div', { class: 't-title' }, s.title),
-        h('div', { class: 't-sub' }, toolName(s.provider), '  ', s.project ?? 'No project'),
-        hit ? h('div', { class: 'snippet' }, snippet(hit.snippet)) : null,
-      ),
-      h('td', { class: 'c-branch' }, s.gitBranch ? h('code', {}, s.gitBranch) : ''),
-      h('td', { class: 'num', title: fullDate(s.updatedAt) }, ago(s.updatedAt)),
-      h(
-        'td',
-        {},
-        ctx?.pct != null
-          ? h(
-              'div',
-              { class: 'gauge', title: `${tokens(ctx.tokens)} of ${tokens(ctx.window)} tokens${ctx.estimated ? ' (window estimated)' : ''}` },
-              h('span', { class: 'track' }, h('span', { class: ctx.hot ? 'hot' : null, style: { width: `${ctx.pct * 100}%` } })),
-              h('span', { class: 'num' }, pctText(ctx)),
-            )
-          : h('span', { class: 'num' }, ctx ? `${tokens(ctx.tokens)} tokens` : ''),
-      ),
-      h('td', { class: 'num c-turns' }, String(s.userTurns)),
-    );
-  });
-
-  els.list.replaceChildren(
-    h(
-      'div',
-      { class: 'sheet' },
-      h(
-        'table',
-        {},
+        swatch(item.provider),
+        h('span', { class: 'r-title', title: item.title }, item.title),
+        h('span', { class: 'r-where' }, [item.project ?? 'no project', item.gitBranch].filter(Boolean).join(' · ')),
         h(
-          'thead',
-          {},
-          h(
-            'tr',
-            {},
-            h('th', { scope: 'col' }, state.search ? `${plural(rows.length, 'session')} mention “${state.search.q}”` : 'Session'),
-            h('th', { scope: 'col', class: 'c-branch' }, 'Branch'),
-            h('th', { scope: 'col' }, sortButton('updated', 'Updated')),
-            h('th', { scope: 'col' }, sortButton('context', 'Context')),
-            h('th', { scope: 'col', class: 'c-turns' }, 'Prompts'),
-          ),
+          'span',
+          { class: 'meter', title: ctx?.pct != null ? `${tokens(ctx.tokens)} of ${ctx.estimated ? '~' : ''}${tokens(ctx.window)} tokens` : null },
+          ctx?.pct != null ? [h('span', { class: 'track' }, h('span', { style: { width: `${pctOf(ctx)}%` } })), `${pctOf(ctx)}%`] : ctx ? tokens(ctx.tokens) : '',
         ),
-        h('tbody', {}, body),
+        h('span', { class: 'r-age', title: fullDate(item.updatedAt) }, ago(item.updatedAt)),
+      );
+    });
+    inner.append(
+      h(
+        'section',
+        { class: 'list-group' },
+        h('div', { class: `list-head${g.quiet ? ' quiet' : ''}` }, h('h2', {}, g.title), h('span', { class: 'meta' }, g.meta)),
+        h('div', { class: 'rows' }, h('div', { class: 'rows-inner' }, rows)),
       ),
-    ),
-  );
+    );
+  }
+  if (!groups.length) {
+    const empty = h('div', { class: 'empty' });
+    renderEmpty(empty);
+    inner.append(empty);
+  }
+  els.list.replaceChildren(inner);
 }
 
 // ── Search ────────────────────────────────────────────────────────────────
-
-/** Server snippets mark matches with «…». Turn those into <mark> without parsing HTML. */
-function snippet(text) {
-  const out = [];
-  const re = /«([^»]*)»/g;
-  let last = 0;
-  let m;
-  while ((m = re.exec(text))) {
-    if (m.index > last) out.push(text.slice(last, m.index));
-    out.push(h('mark', {}, m[1]));
-    last = re.lastIndex;
-  }
-  if (last < text.length) out.push(text.slice(last));
-  return out;
-}
 
 let searchTimer = 0;
 let searchSeq = 0;
@@ -889,61 +812,34 @@ async function runSearch() {
   const q = els.q.value.trim();
   if (!q) return clearSearch(false);
   const seq = ++searchSeq;
+  let ids = new Set();
   try {
     const { hits } = await api(`/api/search?q=${encodeURIComponent(q)}`);
-    if (seq !== searchSeq) return;
-    const visibleHits = hits.filter((x) => !state.hiddenTools.has(x.session.provider));
-    state.search = { q, hits: visibleHits, ids: new Set(visibleHits.map((x) => x.session.id)) };
-  } catch (err) {
-    if (seq !== searchSeq) return;
-    state.search = { q, hits: [], ids: new Set(), error: err.message };
+    ids = new Set(hits.map((x) => x.session.id));
+  } catch {
+    /* an unparseable query just matches nothing */
   }
-  render();
+  if (seq !== searchSeq) return;
+  // Also match titles, projects, branches and group names, so typing what you see always works
+  const needle = q.toLowerCase();
+  const wsName = new Map();
+  for (const w of state.board.workstreams) for (const id of w.sessionIds) wsName.set(id, w.label);
+  for (const x of state.board.sessions) {
+    const hay = `${x.title} ${x.project ?? ''} ${x.gitBranch ?? ''} ${wsName.get(x.id) ?? ''}`.toLowerCase();
+    if (hay.includes(needle)) ids.add(x.id);
+  }
+  state.search = { q, ids };
+  relayout();
+  if (state.view === 'canvas') fit();
 }
 
 function clearSearch(clearInput = true) {
   searchSeq++;
   if (clearInput) els.q.value = '';
+  if (!state.search) return;
   state.search = null;
-  render();
-}
-
-function renderResults() {
-  const show = state.view === 'canvas' && !!state.search;
-  els.results.hidden = !show;
-  if (!show) return;
-  const { q, hits, error } = state.search;
-  const head = h(
-    'header',
-    {},
-    error
-      ? error
-      : hits.length
-        ? `${plural(hits.length, 'session')} mention “${q}”`
-        : `Nothing matches “${q}”. Try fewer words, or end a word with * to match its start.`,
-  );
-  const items = hits.map((hit) =>
-    h(
-      'li',
-      {},
-      h(
-        'button',
-        {
-          type: 'button',
-          class: state.selected === hit.session.id ? 'selected' : null,
-          dataset: { tool: hit.session.provider },
-          onclick: () => {
-            select(hit.session.id);
-            centerOn(hit.session.id);
-          },
-        },
-        h('span', { class: 'r-meta' }, toolName(hit.session.provider), h('span', {}, hit.session.project ?? 'No project'), h('span', {}, ago(hit.session.updatedAt))),
-        h('span', { class: 'r-title' }, hit.session.title),
-        h('span', { class: 'r-snip' }, snippet(hit.snippet)),
-      ),
-    ),
-  );
-  els.results.replaceChildren(head, h('ol', {}, items));
+  relayout();
+  if (state.view === 'canvas') fit();
 }
 
 // ── Reader ────────────────────────────────────────────────────────────────
@@ -969,8 +865,7 @@ async function select(id, { focusReader = true } = {}) {
     renderReader();
     if (focusReader && changed) els.reader.focus({ preventScroll: true });
   } catch (err) {
-    if (seq !== detailSeq) return;
-    toast(err.message);
+    if (seq === detailSeq) toast(err.message);
   }
 }
 
@@ -1002,26 +897,52 @@ function messageBody(text) {
   return parts;
 }
 
-/** Show a file relative to the session's folder when it is inside it. */
-function shortPath(file, cwd) {
-  if (!cwd) return file;
-  const base = cwd.replace(/[\\/]+$/, '');
-  for (const sep of ['/', '\\']) {
-    if (file.startsWith(base + sep)) return file.slice(base.length + 1);
-  }
-  return file;
+/** Context over the session from the real per-turn token counts. */
+function sparkline(series, windowSize, label) {
+  const W = 388;
+  const H = 64;
+  const pts = series.points;
+  const n = pts.length;
+  const xAt = (i) => (n === 1 ? W : (i / (n - 1)) * W);
+  const yAt = (v) => (H - 3 - Math.min(1, v / windowSize) * (H - 8)).toFixed(1);
+  let line = '';
+  pts.forEach((v, i) => {
+    const x = xAt(i).toFixed(1);
+    if (i === 0) {
+      line = `M${n === 1 ? '0' : x},${yAt(v)}`;
+      if (n === 1) line += ` L${x},${yAt(v)}`;
+    } else if (series.compactions.includes(i)) {
+      // A compaction is a sudden drop: go straight down, then continue
+      line += ` L${x},${yAt(pts[i - 1])} L${x},${yAt(v)}`;
+    } else {
+      line += ` L${x},${yAt(v)}`;
+    }
+  });
+  const area = `${line} L${W},${H} L0,${H} Z`;
+  const ticks = series.compactions.map((i) => `M${xAt(i).toFixed(1)},0 L${xAt(i).toFixed(1)},${H}`).join(' ');
+  const svg = s('svg', { class: 'spark', viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', role: 'img', 'aria-label': label });
+  svg.append(s('path', { class: 'area', d: area }), s('path', { class: 'ticks', d: ticks || 'M0,0' }), s('path', { class: 'line', d: line }));
+  return svg;
 }
 
-function miniSession(s, why) {
+function linkCard(sess, why) {
   return h(
     'li',
     {},
     h(
       'button',
-      { type: 'button', dataset: { tool: s.provider }, onclick: () => (select(s.id), state.view === 'canvas' && centerOn(s.id)) },
-      h('span', { class: 'r-meta' }, toolName(s.provider), h('span', { class: 'note' }, `  ${agoLong(s.updatedAt)}`)),
-      h('span', { class: 'm-title' }, s.title),
-      why ? h('span', { class: 'm-why' }, why) : null,
+      {
+        type: 'button',
+        class: 'link-card',
+        dataset: { tool: sess.provider },
+        onclick: () => {
+          select(sess.id);
+          if (state.view === 'canvas' && state.pos.has(sess.id)) centerOn(sess.id);
+        },
+      },
+      h('span', { class: 'lc-top' }, swatch(sess.provider), toolLabel(sess.provider), h('span', { class: 'lc-age' }, agoLong(sess.updatedAt))),
+      h('span', { class: 'lc-title' }, sess.title),
+      why ? h('span', { class: 'lc-why' }, why) : null,
     ),
   );
 }
@@ -1032,27 +953,28 @@ function renderReader() {
     els.reader.hidden = true;
     return;
   }
-  const s = d.session;
-  const ctx = contextOf(s);
+  const sess = d.session;
+  const ctx = contextOf(sess);
   const caps = state.board?.capabilities ?? {};
+  const tool = toolLabel(sess.provider);
 
-  const copy = async () => {
+  const copy = async (btn) => {
     try {
       await navigator.clipboard.writeText(d.resume.shell);
-      toast('Command copied. Paste it into your terminal.');
+      btn.textContent = 'Copied';
+      setTimeout(() => btn.isConnected && (btn.textContent = 'Copy command'), 1800);
     } catch {
       const code = $('.resume code', els.reader);
       const range = document.createRange();
       range.selectNodeContents(code);
-      const sel = getSelection();
-      sel.removeAllRanges();
-      sel.addRange(range);
+      getSelection().removeAllRanges();
+      getSelection().addRange(range);
       toast('Press ⌘C to copy the selected command.');
     }
   };
   const openTerminal = async () => {
     try {
-      await api('/api/open-terminal', { method: 'POST', body: { id: s.id } });
+      await api('/api/open-terminal', { method: 'POST', body: { id: sess.id } });
       toast('Opened in Terminal.');
     } catch (err) {
       toast(err.message);
@@ -1067,64 +989,55 @@ function renderReader() {
         h(
           'div',
           { class: 'actions' },
-          caps.openTerminal ? h('button', { type: 'button', class: 'btn', onclick: openTerminal }, 'Open in Terminal') : null,
-          h('button', { type: 'button', class: caps.openTerminal ? 'btn secondary' : 'btn', onclick: copy }, 'Copy command'),
+          caps.openTerminal ? h('button', { type: 'button', class: 'pill solid', onclick: openTerminal }, 'Open in Terminal') : null,
+          h('button', { type: 'button', class: `pill ${caps.openTerminal ? 'outline' : 'solid'}`, onclick: (e) => copy(e.currentTarget) }, 'Copy command'),
+          h('span', { class: 'hint' }, sess.isSubagent ? 'Reopens the conversation that started this subagent' : `Resumes in ${tool}`),
         ),
-        s.isSubagent ? h('p', { class: 'note' }, 'Subagents can’t be resumed on their own, so this reopens the conversation that started it.') : null,
       )
     : null;
 
-  let contextBlock = null;
-  if (ctx?.pct != null) {
-    const ticks = [];
-    for (let i = 1; i <= s.compactions; i++) ticks.push(h('i', { style: { left: `${(i / (s.compactions + 1)) * ctx.pct * 100}%` } }));
-    contextBlock = h(
-      'div',
-      { class: 'context', dataset: { tool: s.provider } },
-      h('div', { class: 'bar-big', role: 'img', 'aria-label': `Context ${pctText(ctx)} full` }, h('span', { class: ctx.hot ? 'hot' : null, style: { width: `${ctx.pct * 100}%` } }), ticks),
+  const compLine = sess.compactions ? `compacted ${times(sess.compactions)}` : 'never compacted';
+  let context = null;
+  if (ctx) {
+    const series = d.contextSeries;
+    context = h(
+      'section',
+      { class: 'section', dataset: { tool: sess.provider } },
+      h('div', { class: 'label' }, 'Context window'),
       h(
-        'p',
-        {},
-        `${pctText(ctx)} full: ${tokens(ctx.tokens)} of ${tokens(ctx.window)} tokens${ctx.estimated ? ' (window size estimated; Claude Code doesn’t record it)' : ''}. `,
-        s.compactions ? `Compacted ${times(s.compactions)}.` : 'Never compacted.',
-        ctx.hot ? ' Nearly full: consider starting a fresh session.' : '',
+        'div',
+        { class: 'metric' },
+        h('span', { class: 'big' }, ctx.pct != null ? `${pctOf(ctx)}%` : tokens(ctx.tokens)),
+        h(
+          'span',
+          { class: 'tok' },
+          ctx.pct != null
+            ? `${tokens(ctx.tokens)} of ${ctx.estimated ? '~' : ''}${tokens(ctx.window)} tokens · ${compLine}`
+            : `tokens in context · ${compLine}`,
+        ),
       ),
+      ctx.pct != null ? h('div', { class: 'bar-big' }, h('span', { style: { width: `${pctOf(ctx)}%` } })) : null,
+      series?.points.length && ctx.window
+        ? [sparkline(series, ctx.window, `Context over the session, ${compLine}`), h('div', { class: 'spark-axis' }, h('span', {}, 'start'), h('span', {}, compLine), h('span', {}, 'now'))]
+        : null,
+      ctx.estimated ? h('p', { class: 'note' }, 'Claude Code doesn’t record its window size, so 200k is assumed.') : null,
+      ctx.pct >= 0.8 ? h('p', { class: 'advice' }, 'Nearly full. Consider starting a fresh session for the next task.') : null,
     );
-  } else if (ctx) {
-    contextBlock = h('div', { class: 'context' }, h('p', {}, `Context: ${tokens(ctx.tokens)} tokens. ${s.compactions ? `Compacted ${times(s.compactions)}.` : ''}`));
   }
 
   const facts = [
-    ['Project', s.cwd ? h('code', {}, s.cwd) : 'Unknown'],
-    s.gitBranch && ['Branch', h('code', {}, s.gitBranch)],
-    s.model && ['Model', s.model],
-    ['Started', h('span', { title: fullDate(s.startedAt) }, fullDate(s.startedAt) || 'Unknown')],
-    ['Last active', h('span', { title: fullDate(s.updatedAt) }, agoLong(s.updatedAt))],
-    ['Activity', `${plural(s.userTurns, 'prompt')}, ${plural(s.assistantTurns, 'reply', 'replies')}, ${plural(s.toolCalls, 'tool call')}`],
-    ['Tokens', `${tokens(s.tokensIn)} read, ${tokens(s.tokensOut)} written`],
-    ['Id', h('code', { title: s.id }, s.shortId)],
-  ].filter(Boolean);
-
-  const convo = h(
-    'div',
-    { class: `convo${state.showTools ? '' : ' hide-tools'}`, dataset: { tool: s.provider } },
-    d.messages.map((m) =>
-      h(
-        'div',
-        { class: `msg ${m.role}` },
-        h(
-          'div',
-          { class: 'who' },
-          m.role === 'user' ? 'You' : m.role === 'assistant' ? toolLabel(s.provider) : m.toolName ?? 'Tool',
-          m.ts ? h('time', { datetime: m.ts, title: fullDate(m.ts) }, ago(m.ts)) : null,
-        ),
-        h('div', { class: 'body' }, m.role === 'tool' ? m.text : messageBody(m.text)),
-      ),
-    ),
-  );
+    ['Project', sess.cwd ?? 'unknown'],
+    ['Branch', sess.gitBranch ?? '—'],
+    ['Model', sess.model ?? '—'],
+    ['Started', fullDate(sess.startedAt)],
+    ['Last active', agoLong(sess.updatedAt)],
+    ['Activity', `${plural(sess.userTurns, 'prompt')}, ${plural(sess.assistantTurns, 'reply', 'replies')}, ${plural(sess.toolCalls, 'tool call')}`],
+    ['Tokens', `${tokens(sess.tokensIn)} read, ${tokens(sess.tokensOut)} written`],
+    ['Id', sess.shortId],
+  ];
 
   const related = d.related.map((r) =>
-    miniSession(
+    linkCard(
       r.session,
       r.reason === 'shared-files'
         ? `Both edited ${shortPath(r.sharedFiles[0], r.session.cwd)}${r.sharedFiles.length > 1 ? ` and ${plural(r.sharedFiles.length - 1, 'other file')}` : ''}`
@@ -1132,101 +1045,140 @@ function renderReader() {
     ),
   );
 
+  const convo = h(
+    'div',
+    { class: `convo${state.showTools ? '' : ' hide-tools'}` },
+    d.messages.map((m) =>
+      h(
+        'div',
+        { class: `msg ${m.role}` },
+        h(
+          'div',
+          { class: 'who' },
+          m.role === 'user' ? 'You' : m.role === 'assistant' ? tool : m.toolName ?? 'Tool',
+          m.ts ? h('time', { datetime: m.ts, title: fullDate(m.ts) }, ago(m.ts)) : null,
+        ),
+        h('div', { class: 'body' }, m.role === 'tool' ? m.text : messageBody(m.text)),
+      ),
+    ),
+  );
+
   els.reader.replaceChildren(
+    h('div', { class: 'reader-glow', 'aria-hidden': 'true' }),
     h(
       'div',
-      { class: 'reader-inner', dataset: { tool: s.provider } },
+      { class: 'reader-inner', dataset: { tool: sess.provider } },
       h(
         'div',
         { class: 'reader-head' },
-        toolName(s.provider, { title: s.cliVersion ? `version ${s.cliVersion}` : null }),
-        h('button', { type: 'button', class: 'close', 'aria-label': 'Close session', onclick: closeReader }, '×'),
-      ),
-      h('h2', { id: 'reader-title' }, s.title),
-      resume,
-      contextBlock,
-      h('dl', { class: 'facts' }, facts.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
-      d.filesTouched.length ? [h('h3', {}, `Files it changed (${d.filesTouched.length})`), h('ul', { class: 'files' }, d.filesTouched.map((f) => h('li', { title: f }, shortPath(f, s.cwd))))] : null,
-      related.length ? [h('h3', {}, 'Related sessions'), h('ul', { class: 'mini' }, related)] : null,
-      d.subagents.length ? [h('h3', {}, 'Subagents'), h('ul', { class: 'mini' }, d.subagents.map((x) => miniSession(x)))] : null,
-      h(
-        'div',
-        { class: 'convo-head' },
-        h('h3', {}, 'Conversation'),
+        h('span', { class: 'tool-tag', title: sess.cliVersion ? `version ${sess.cliVersion}` : null }, swatch(sess.provider), tool),
         h(
-          'label',
-          {},
-          h('input', {
-            type: 'checkbox',
-            checked: state.showTools,
-            onchange: (e) => {
-              state.showTools = e.target.checked;
-              store.set('showTools', state.showTools);
-              convo.classList.toggle('hide-tools', !state.showTools);
-            },
-          }),
-          'Show tool calls',
+          'button',
+          { type: 'button', class: 'close', 'aria-label': 'Close details', onclick: closeReader },
+          (() => {
+            const svg = s('svg', { width: 12, height: 12, viewBox: '0 0 12 12', 'aria-hidden': 'true' });
+            svg.append(s('path', { d: 'M2 2 L10 10 M10 2 L2 10' }));
+            return svg;
+          })(),
         ),
       ),
-      d.truncatedMessages ? h('p', { class: 'note' }, `Showing the last ${d.messages.length} messages. ${plural(d.truncatedMessages, 'earlier message')} not shown.`) : null,
-      d.messages.length ? convo : h('p', { class: 'note' }, 'No messages were recorded for this session.'),
+      h('h2', { id: 'reader-title' }, sess.title),
+      resume,
+      context,
+      h('dl', { class: 'facts' }, facts.flatMap(([k, v]) => [h('dt', {}, k), h('dd', { title: k === 'Id' ? sess.id : null }, v)])),
+      h(
+        'section',
+        { class: 'section' },
+        h('div', { class: 'label' }, `Files it changed · ${d.filesTouched.length}`),
+        d.filesTouched.length
+          ? h('ul', { class: 'files' }, d.filesTouched.map((f) => h('li', { title: f }, shortPath(f, sess.cwd))))
+          : h('p', { class: 'note' }, 'Read-only session — nothing was edited.'),
+      ),
+      related.length ? h('section', { class: 'section' }, h('div', { class: 'label' }, 'Related sessions'), h('ul', { class: 'links' }, related)) : null,
+      d.subagents.length
+        ? h('section', { class: 'section' }, h('div', { class: 'label' }, 'Subagents'), h('ul', { class: 'links' }, d.subagents.map((x) => linkCard(x, null))))
+        : null,
+      h(
+        'section',
+        { class: 'section' },
+        h(
+          'div',
+          { class: 'convo-head' },
+          h('div', { class: 'label' }, 'Conversation'),
+          h(
+            'label',
+            { class: 'toggle' },
+            h('input', {
+              type: 'checkbox',
+              checked: state.showTools,
+              onchange: (e) => {
+                state.showTools = e.target.checked;
+                prefs.set('showTools', state.showTools);
+                convo.classList.toggle('hide-tools', !state.showTools);
+              },
+            }),
+            'Tool calls',
+          ),
+        ),
+        d.truncatedMessages ? h('p', { class: 'note' }, `Showing the last ${d.messages.length} messages.`) : null,
+        d.messages.length ? convo : h('p', { class: 'note' }, 'No messages were recorded for this session.'),
+      ),
     ),
   );
   els.reader.hidden = false;
   els.reader.scrollTop = 0;
 }
 
-// ── Top bar ───────────────────────────────────────────────────────────────
+// ── Header ────────────────────────────────────────────────────────────────
 
-function renderToolbar() {
+function renderHeader() {
   for (const b of document.querySelectorAll('[data-view]')) b.setAttribute('aria-pressed', String(b.dataset.view === state.view));
   for (const b of document.querySelectorAll('[data-group]')) b.setAttribute('aria-pressed', String(b.dataset.group === state.grouping));
-  els.grouping.hidden = state.view !== 'canvas';
 
+  const all = state.board?.sessions ?? [];
   const counts = new Map();
-  for (const s of state.board?.sessions ?? []) counts.set(s.provider, (counts.get(s.provider) ?? 0) + 1);
-  els.toolFilters.replaceChildren(
-    ...(state.board?.providers ?? []).map((p) =>
-      h(
+  for (const x of all) counts.set(x.provider, (counts.get(x.provider) ?? 0) + 1);
+  els.chips.replaceChildren(
+    ...(state.board?.providers ?? []).map((p) => {
+      const on = !state.hiddenTools.has(p.id);
+      return h(
         'button',
         {
           type: 'button',
-          class: 'tool-toggle',
+          class: 'chip',
           dataset: { tool: p.id },
-          'aria-pressed': String(!state.hiddenTools.has(p.id)),
-          title: state.hiddenTools.has(p.id) ? `Show ${p.label} sessions` : `Hide ${p.label} sessions`,
+          'aria-pressed': String(on),
+          title: on ? `Hide ${p.label} sessions` : `Show ${p.label} sessions`,
           onclick: () => {
-            if (state.hiddenTools.has(p.id)) state.hiddenTools.delete(p.id);
-            else state.hiddenTools.add(p.id);
-            store.set('hiddenTools', [...state.hiddenTools]);
-            if (state.search) runSearch();
+            if (on) state.hiddenTools.add(p.id);
+            else state.hiddenTools.delete(p.id);
+            prefs.set('hiddenTools', [...state.hiddenTools]);
             relayout();
+            if (state.view === 'canvas') fit();
           },
         },
-        h('span', { class: 'swatch', 'aria-hidden': 'true' }),
+        swatch(p.id),
         p.label,
-        h('span', { class: 'count' }, String(counts.get(p.id) ?? 0)),
-      ),
-    ),
+        h('span', { class: 'n' }, String(counts.get(p.id) ?? 0)),
+      );
+    }),
   );
-  renderStatus();
-}
 
-function renderStatus() {
   if (!state.connected) {
-    els.status.textContent = 'Not connected. Is contextdeck ui still running?';
+    els.count.textContent = 'not connected';
+    els.count.title = 'Is contextdeck ui still running?';
     return;
   }
-  const n = state.board?.sessions.length ?? 0;
-  els.status.textContent = plural(n, 'session');
-  els.status.title = state.loadedAt ? `Last checked ${agoLong(state.loadedAt.toISOString())}` : '';
+  const shown = visibleSessions().length;
+  els.count.textContent = shown === all.length ? plural(all.length, 'session') : `${shown} of ${all.length}`;
+  els.count.title = state.loadedAt ? `Last checked ${agoLong(state.loadedAt.toISOString())}` : '';
 }
 
 for (const b of document.querySelectorAll('[data-view]')) {
   b.addEventListener('click', () => {
     if (state.view === b.dataset.view) return;
     state.view = b.dataset.view;
-    store.set('view', state.view);
+    prefs.set('view', state.view);
     render();
     if (state.view === 'canvas') fit();
   });
@@ -1236,16 +1188,16 @@ for (const b of document.querySelectorAll('[data-group]')) {
   b.addEventListener('click', () => {
     if (state.grouping === b.dataset.group) return;
     state.grouping = b.dataset.group;
-    store.set('grouping', state.grouping);
+    prefs.set('grouping', state.grouping);
     relayout();
-    fit();
+    if (state.view === 'canvas') fit();
   });
 }
 
-$('#rescan').addEventListener('click', async (e) => {
-  const btn = e.currentTarget;
-  btn.disabled = true;
-  btn.textContent = 'Scanning…';
+els.rescan.addEventListener('click', async () => {
+  const label = $('span', els.rescan);
+  els.rescan.disabled = true;
+  label.textContent = 'Scanning';
   try {
     const sum = await api('/api/reindex', { method: 'POST' });
     await refresh();
@@ -1253,8 +1205,8 @@ $('#rescan').addEventListener('click', async (e) => {
   } catch (err) {
     toast(err.message);
   } finally {
-    btn.disabled = false;
-    btn.textContent = 'Rescan';
+    els.rescan.disabled = false;
+    label.textContent = 'Rescan';
   }
 });
 
@@ -1272,47 +1224,46 @@ document.addEventListener('keydown', (e) => {
     if (state.search) return clearSearch();
   }
   if (typing || state.view !== 'canvas' || e.metaKey || e.ctrlKey || e.altKey) return;
-  const r = els.desk.getBoundingClientRect();
-  if (e.key === '+' || e.key === '=') zoomAt(1.25, r.width / 2, r.height / 2);
-  else if (e.key === '-') zoomAt(0.8, r.width / 2, r.height / 2);
+  const r = els.board.getBoundingClientRect();
+  if (e.key === '+' || e.key === '=') zoomAt(1.15, r.width / 2, r.height / 2);
+  else if (e.key === '-') zoomAt(1 / 1.15, r.width / 2, r.height / 2);
   else if (e.key === '0') fit();
 });
 
 // ── Render and data flow ──────────────────────────────────────────────────
 
 function relayout() {
+  if (!state.board) return;
   layout();
   render();
 }
 
 function render() {
   if (!state.board) return;
-  renderToolbar();
-  els.desk.hidden = state.view !== 'canvas';
+  renderHeader();
+  els.board.hidden = state.view !== 'canvas';
   els.list.hidden = state.view !== 'list';
   if (state.view === 'canvas') renderCanvas();
   else renderList();
-  renderResults();
   if (!state.selected) els.reader.hidden = true;
 }
 
 function setBoard(board) {
-  const before = state.board ? new Map(state.board.sessions.map((s) => [s.id, s.updatedAt])) : null;
+  const before = state.board ? new Map(state.board.sessions.map((x) => [x.id, x.updatedAt])) : null;
   state.board = board;
-  state.byId = new Map(board.sessions.map((s) => [s.id, s]));
+  state.byId = new Map(board.sessions.map((x) => [x.id, x]));
   state.loadedAt = new Date();
   layout();
   render();
   if (before) {
-    for (const s of board.sessions) {
-      if (before.get(s.id) !== s.updatedAt) {
-        const el = cardEls.get(s.id);
-        if (!el) continue;
-        el.classList.remove('fresh');
-        void el.offsetWidth;
-        el.classList.add('fresh');
-        el.addEventListener('animationend', () => el.classList.remove('fresh'), { once: true });
-      }
+    for (const x of board.sessions) {
+      if (before.get(x.id) === x.updatedAt) continue;
+      const el = cardEls.get(x.id);
+      if (!el) continue;
+      el.classList.remove('fresh');
+      void el.offsetWidth;
+      el.classList.add('fresh');
+      el.addEventListener('animationend', () => el.classList.remove('fresh'), { once: true });
     }
   }
   return before;
@@ -1321,13 +1272,11 @@ function setBoard(board) {
 async function refresh() {
   const board = await api('/api/board');
   const before = setBoard(board);
-  if (state.selected) {
-    const prev = before?.get(state.selected);
-    const now = state.byId.get(state.selected);
-    if (!now && !board.sessions.length) closeReader();
-    else if (prev !== now?.updatedAt) select(state.selected, { focusReader: false });
-  }
   if (state.search) runSearch();
+  if (state.selected) {
+    const now = state.byId.get(state.selected);
+    if (now && before?.get(state.selected) !== now.updatedAt) select(state.selected, { focusReader: false });
+  }
 }
 
 function connectEvents() {
@@ -1345,7 +1294,7 @@ function connectEvents() {
     failures++;
     if (failures >= 2 && state.connected) {
       state.connected = false;
-      renderStatus();
+      renderHeader();
     }
   };
 }
@@ -1366,29 +1315,27 @@ async function start() {
     els.empty.hidden = false;
     els.empty.replaceChildren(
       h('h2', {}, 'Couldn’t load your sessions'),
-      h('p', {}, err.message),
-      h('p', {}, 'Check that ', h('code', {}, 'contextdeck ui'), ' is still running in your terminal, then reload this page.'),
+      h('p', {}, `${err.message} Check that `, h('code', {}, 'contextdeck ui'), ' is still running, then reload.'),
     );
     return;
   }
   connectEvents();
   setInterval(() => {
-    renderStatus();
-    if (state.view === 'canvas') {
-      // Keep "5m" style ages honest without re-laying anything out
-      for (const s of visibleSessions()) {
-        const age = cardEls.get(s.id)?.querySelector('.age');
-        if (age) {
-          const t = ago(s.updatedAt);
-          age.textContent = t;
-          age.classList.toggle('live', t === 'now');
-        }
+    renderHeader();
+    if (state.view !== 'canvas') return;
+    // Keep ages and glows honest without re-laying anything out
+    for (const g of state.groups) {
+      for (const item of g.items) {
+        const age = cardEls.get(item.id)?.querySelector('.age');
+        if (!age) continue;
+        const t = ago(item.updatedAt);
+        age.textContent = t;
+        age.classList.toggle('now', t === 'now');
       }
     }
+    renderGroups();
   }, 30_000);
-  window.addEventListener('resize', () => {
-    if (state.view === 'canvas') applyCam();
-  });
+  window.addEventListener('resize', () => state.view === 'canvas' && applyCam());
 }
 
 start();

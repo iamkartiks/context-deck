@@ -4,8 +4,52 @@ import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { loadConfig } from '../src/config.js';
 import { indexSources } from '../src/indexer.js';
-import { absoluteIn, Store, toFtsQuery } from '../src/store.js';
+import { DatabaseSync } from 'node:sqlite';
+import { absoluteIn, downsampleSeries, Store, toFtsQuery } from '../src/store.js';
 import { scratch } from './helpers.js';
+
+describe('downsampleSeries', () => {
+  it('leaves short series alone', () => {
+    assert.deepEqual(downsampleSeries([1, 2, 3], [2], 10), { points: [1, 2, 3], compactions: [2] });
+  });
+  it('keeps the last value of each bucket and moves compaction marks with it', () => {
+    const points = Array.from({ length: 1000 }, (_, i) => i);
+    const out = downsampleSeries(points, [500, 999], 100);
+    assert.equal(out.points.length, 100);
+    assert.equal(out.points[0], 9);
+    assert.equal(out.points[99], 999, 'the final context size is always kept');
+    assert.deepEqual(out.compactions, [50, 99]);
+  });
+  it('clamps bad marks instead of failing', () => {
+    assert.deepEqual(downsampleSeries([5, 6], [-3, 99], 10).compactions, [0, 2]);
+  });
+});
+
+describe('index upgrade', () => {
+  it('adds the context column to a v1 index and rebuilds it', async () => {
+    const s = scratch();
+    try {
+      const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex }, {});
+      let store = new Store(cfg.dbPath);
+      await indexSources(store, cfg.sources);
+      store.close();
+
+      // Turn it back into a v1 index
+      const db = new DatabaseSync(cfg.dbPath);
+      db.exec(`ALTER TABLE sessions DROP COLUMN context_series; UPDATE meta SET value = '1' WHERE key = 'schema_version';`);
+      db.close();
+
+      store = new Store(cfg.dbPath);
+      assert.equal(store.stats().sessions, 0, 'cache cleared so every file is re-read');
+      const sum = await indexSources(store, cfg.sources);
+      assert.equal(sum.indexed, 5);
+      assert.deepEqual(store.contextSeries(store.resolve('cc:0f3a1b11').id), { points: [16_500, 19_500, 44_000], compactions: [2] });
+      store.close();
+    } finally {
+      s.cleanup();
+    }
+  });
+});
 
 describe('absoluteIn', () => {
   it('resolves with the path style of the recorded cwd, whatever OS runs the index', () => {

@@ -4,6 +4,28 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-29
+
+A new look, from the "minimal organiser" design.
+
+### Changed
+
+- The canvas, list and session panel are restyled: Geist and Geist Mono (bundled, SIL OFL), 1px ink lines, a warm grey board, one yellow accent for Claude Code and warm grey for Codex, round vs square tool marks, uppercase tab controls.
+- Smaller 208 × 132 cards; linked workstreams sit in boxes, unlinked sessions float with a quieter title.
+- **Tidy up / Scatter** toggle: a neat grid, or the loose layout with your hand-placed cards. Moving a card while tidy switches back to scatter.
+- Groups active in the last hour glow.
+- The list view is grouped the same way as the canvas.
+- Search narrows the board to matching sessions (full text plus titles, projects, branches and workstream names) and zooms to fit them.
+- The session panel shows a large context percentage and a chart of context use over the whole session.
+
+### Added
+
+- Adapters record context size after every turn and where compactions happened; the index stores it (schema v2). Existing indexes upgrade themselves on first run by re-reading your session files.
+
+### Fixed
+
+- Tilted cards drifted away from their spots on large boards (their position was being rotated along with the card).
+
 ## [0.2.0] - 2026-10-29
 
 The canvas.

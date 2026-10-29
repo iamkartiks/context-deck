@@ -48,6 +48,12 @@ describe('Codex adapter', () => {
     assert.equal(s!.compactions, 1);
   });
 
+  it('records context size per token_count and compaction points', async () => {
+    const { session: s } = await codexAdapter.parse(CX_MODERN);
+    assert.deepEqual(s!.contextSeries, [62_500]);
+    assert.deepEqual(s!.compactionPoints, [1]);
+  });
+
   it('extracts files from apply_patch calls and shell commands', async () => {
     const { session: s } = await codexAdapter.parse(CX_MODERN);
     assert.equal(s!.toolCalls, 2);

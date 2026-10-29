@@ -134,7 +134,10 @@ async function parse(filePath: string): Promise<ParseResult> {
     trackTime(s, o.timestamp);
 
     if (type === 'system') {
-      if (o.subtype === 'compact_boundary') s.compactions++;
+      if (o.subtype === 'compact_boundary') {
+        s.compactions++;
+        s.compactionPoints.push(s.contextSeries.length);
+      }
       continue;
     }
 
@@ -193,6 +196,7 @@ async function parse(filePath: string): Promise<ParseResult> {
         s.tokensIn += input;
         s.tokensOut += asNumber(usage.output_tokens);
         s.contextTokens = input + asNumber(usage.output_tokens);
+        s.contextSeries.push(s.contextTokens);
         s.assistantTurns++;
       }
       const content = msg.content;
