@@ -156,12 +156,29 @@ const MEANING_MARGIN = 0.12;
 const MIN_SCORE = 0.1;
 
 /**
- * The lowest score a match by meaning needs, when the person hasn't set one.
- * Measured per model family with scripts/eval-meaning.mjs; others get the
- * generic floor.
+ * Cutoffs measured with scripts/eval-meaning.mjs: ten topics each with two
+ * look-alike sessions, 30 questions with one right answer and 18 with none,
+ * in English, Hindi and Hinglish.
  */
-export function defaultMinScore(_model: string): number {
-  return MIN_SCORE;
+const MEASURED_CUTOFFS: { model: RegExp; minScore: number }[] = [
+  // qwen3-embedding:0.6b at 512 dims (2026-10-29). Right answers scored
+  // 0.43–0.92 (median 0.66); the best match for a question with no answer
+  // 0.35–0.56 (median 0.48). At 0.50 all 25 right-first answers stay and 15
+  // of 18 no-answer questions get nothing added; at the old 0.1, none did.
+  { model: /^qwen3-embedding(:0\.6b)?$/, minScore: 0.5 },
+];
+
+/**
+ * The lowest score a match by meaning needs, when the person hasn't set one:
+ * the measured value for known models, the generic floor otherwise.
+ */
+export function defaultMinScore(model: string): number {
+  return MEASURED_CUTOFFS.find((m) => m.model.test(model))?.minScore ?? MIN_SCORE;
+}
+
+/** True when the cutoff for this model was measured rather than the generic floor. */
+export function hasMeasuredCutoff(model: string): boolean {
+  return MEASURED_CUTOFFS.some((m) => m.model.test(model));
 }
 
 export interface CombineOptions {

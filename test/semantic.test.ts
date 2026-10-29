@@ -7,7 +7,7 @@ import { loadConfig } from '../src/config.js';
 import { addDecision } from '../src/decisions.js';
 import { checkAllowed, createEmbedder, EmbedError, embedderKey, formatFor, shapeVector } from '../src/embedder.js';
 import { indexSources } from '../src/indexer.js';
-import { catchUp, combine, piecesOf, searchByMeaning } from '../src/semantic.js';
+import { catchUp, combine, defaultMinScore, piecesOf, searchByMeaning } from '../src/semantic.js';
 import { defaultSettings, isLocalUrl, loadSettings, sanitizeSettings, saveSettings, settingsPath, type SemanticSettings } from '../src/settings.js';
 import { Store } from '../src/store.js';
 import { REPO, scratch, startFakeModelServer, type FakeModelServer } from './helpers.js';
@@ -178,6 +178,13 @@ describe('search by meaning', () => {
     assert.ok(hits.length <= 12, 'meaning alone adds only the closest few');
   });
 
+  it('uses measured cutoffs for known models', () => {
+    assert.equal(defaultMinScore('qwen3-embedding:0.6b'), 0.5);
+    assert.equal(defaultMinScore('qwen3-embedding'), 0.5);
+    assert.equal(defaultMinScore('qwen3-embedding:8b'), 0.1, 'other sizes score differently; not measured yet');
+    assert.equal(defaultMinScore('bge-m3'), 0.1);
+  });
+
   it('adds nothing by meaning when the best match is below the cutoff', async () => {
     const embedder = createEmbedder(settings);
     const q = 'which chat decided on the database';
@@ -316,7 +323,11 @@ describe('search by meaning from the command line', () => {
     assert.equal(JSON.parse((await run('semantic', '--json')).out).minScore, 0.33);
     assert.match((await run('semantic')).out, /cutoff 0\.33/);
     assert.equal((await run('semantic', 'enable', '--url', server.url, '--min-score', 'auto')).code, 0);
+    assert.equal(JSON.parse((await run('semantic', '--json')).out).minScore, 0.5, 'the measured default for qwen3-embedding:0.6b');
+    const other = await run('semantic', 'enable', '--url', server.url, '--model', 'nomic-embed-text');
+    assert.match(other.out, /No measured cutoff for nomic-embed-text yet.*npm run eval:meaning/s);
     assert.equal(JSON.parse((await run('semantic', '--json')).out).minScore, 0.1);
+    await run('semantic', 'enable', '--url', server.url, '--model', 'qwen3-embedding:0.6b');
     assert.equal((await run('semantic', 'enable', '--min-score', '7')).code, 2);
   });
 

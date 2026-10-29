@@ -295,12 +295,13 @@ try {
   });
 
   // Try every cutoff; the best ones get the most right first plus the most no-answer questions clean.
-  // Of equally good cutoffs, take the middle one: it's the least sensitive to small score changes.
+  // Of equally good cutoffs, prefer the one that finds the most right answers (then the lowest):
+  // a stray result is labelled "by meaning" and easy to skip, a missing right answer isn't.
   const sweep = [];
   for (let c = 0; c <= 0.9001; c += 0.01) sweep.push({ cutoff: Math.round(c * 100) / 100, ...tally(c) });
   const bestTotal = Math.max(...sweep.map((s) => s.first + s.clean));
   const best = sweep.filter((s) => s.first + s.clean === bestTotal);
-  const suggested = best[Math.floor((best.length - 1) / 2)];
+  const suggested = [...best].sort((a, b) => b.first - a.first || a.cutoff - b.cutoff)[0];
   const now = { cutoff: current, ...tally(current) };
 
   const rows = LANGS.map(([lang, label]) => {

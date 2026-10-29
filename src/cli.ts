@@ -276,7 +276,12 @@ async function cmdSemantic(cfg: Config, store: Store, v: Values, args: string[])
   if (!v.json) process.stderr.write(c.dim('Checking the model answers…\n'));
   // The CLI catches up in the foreground instead, below, so progress can be shown
   const st = await meaning.enable(input, { background: false });
-  if (!v.json) process.stdout.write(`${c.green('✓')} Search by meaning is on: ${st.model} ${c.dim(`at ${st.url}`)}\n`);
+  if (!v.json) {
+    process.stdout.write(`${c.green('✓')} Search by meaning is on: ${st.model} ${c.dim(`at ${st.url}, cutoff ${st.minScore}`)}\n`);
+    if (meaning.cutoffIsGeneric()) {
+      process.stdout.write(c.dim(`No measured cutoff for ${st.model} yet. To find one: npm run eval:meaning, then semantic enable --min-score <n>.\n`));
+    }
+  }
 
   const tty = process.stderr.isTTY && !v.json;
   const ctrl = new AbortController();
