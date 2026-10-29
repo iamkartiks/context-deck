@@ -42,7 +42,7 @@ describe('index size', () => {
         }
         writeFileSync(join(dir, `${id}.jsonl`), lines.join('\n') + '\n');
       }
-      const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex }, {});
+      const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex, qwenDir: s.qwen }, {});
       const store = new Store(cfg.dbPath);
       await indexSources(store, cfg.sources);
 
@@ -83,7 +83,7 @@ describe('index upgrade', () => {
   it('adds the context column to a v1 index and rebuilds it', async () => {
     const s = scratch();
     try {
-      const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex }, {});
+      const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex, qwenDir: s.qwen }, {});
       let store = new Store(cfg.dbPath);
       await indexSources(store, cfg.sources);
       store.close();
@@ -96,7 +96,7 @@ describe('index upgrade', () => {
       store = new Store(cfg.dbPath);
       assert.equal(store.stats().sessions, 0, 'cache cleared so every file is re-read');
       const sum = await indexSources(store, cfg.sources);
-      assert.equal(sum.indexed, 5);
+      assert.equal(sum.indexed, 8);
       assert.deepEqual(store.contextSeries(store.resolve('cc:0f3a1b11').id), { points: [16_500, 19_500, 44_000], compactions: [2] });
       store.close();
 
@@ -141,7 +141,7 @@ describe('toFtsQuery', () => {
 
 describe('Store + indexer', () => {
   const s = scratch();
-  const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex }, {});
+  const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex, qwenDir: s.qwen }, {});
   let store: Store;
 
   before(() => {
@@ -154,37 +154,38 @@ describe('Store + indexer', () => {
 
   it('indexes every fixture', async () => {
     const sum = await indexSources(store, cfg.sources);
-    assert.equal(sum.scanned, 6);
-    assert.equal(sum.indexed, 5);
+    assert.equal(sum.scanned, 9);
+    assert.equal(sum.indexed, 8);
     assert.equal(sum.empty, 1);
     assert.equal(sum.failed, 0);
-    assert.equal(sum.badLines, 1);
+    assert.equal(sum.badLines, 2);
   });
 
   it('is incremental: a second run parses nothing', async () => {
     const sum = await indexSources(store, cfg.sources);
     assert.equal(sum.indexed, 0);
-    assert.equal(sum.unchanged, 6);
+    assert.equal(sum.unchanged, 9);
   });
 
   it('lists newest first and hides subagents unless asked', () => {
     const rows = store.listSessions();
-    assert.equal(rows.length, 4);
-    assert.equal(rows[0]!.provider, 'codex');
+    assert.equal(rows.length, 6);
+    assert.equal(rows[0]!.provider, 'qwen-code');
     assert.ok(rows.every((r) => !r.isSubagent));
-    assert.equal(store.listSessions({ includeSubagents: true }).length, 5);
+    assert.equal(store.listSessions({ includeSubagents: true }).length, 8);
   });
 
   it('filters by provider (id or short prefix) and project', () => {
     assert.equal(store.listSessions({ provider: 'cx' }).length, 2);
     assert.equal(store.listSessions({ provider: 'claude-code' }).length, 2);
-    assert.equal(store.listSessions({ project: 'acme-shop' }).length, 2);
-    assert.equal(store.listSessions({ project: '/Users/alice/code/blog' }).length, 1);
+    assert.equal(store.listSessions({ provider: 'qw' }).length, 2);
+    assert.equal(store.listSessions({ project: 'acme-shop' }).length, 3);
+    assert.equal(store.listSessions({ project: '/Users/alice/code/blog' }).length, 2);
   });
 
   it('searches across providers, best message per session', () => {
     const hits = store.search('cookie');
-    assert.deepEqual(hits.map((h) => h.session.provider).sort(), ['claude-code', 'codex']);
+    assert.deepEqual(hits.map((h) => h.session.provider).sort(), ['claude-code', 'codex', 'qwen-code']);
     for (const h of hits) assert.match(h.snippet, /«cookie»/i);
     assert.equal(store.search('cookie', { provider: 'codex' }).length, 1);
     assert.equal(store.search('"refresh path"').length, 2);
@@ -214,32 +215,34 @@ describe('Store + indexer', () => {
   it('links sessions across tools by shared files (relative paths resolved against cwd)', () => {
     const claude = store.resolve('cc:0f3a1b11');
     const related = store.related(claude.id);
-    assert.equal(related[0]?.session.provider, 'codex');
-    assert.equal(related[0]?.reason, 'shared-files');
-    assert.deepEqual(related[0]?.sharedFiles, ['src/auth/session.ts']);
+    assert.deepEqual(related.map((r) => [r.session.provider, r.reason]), [
+      ['qwen-code', 'shared-files'],
+      ['codex', 'shared-files'],
+    ]);
+    assert.deepEqual(related[1]?.sharedFiles, ['src/auth/session.ts'], 'Codex wrote a relative path');
   });
 
   it('groups projects across tools', () => {
     const projects = store.projects();
     const shop = projects.find((p) => p.project === 'acme-shop');
-    assert.deepEqual(shop?.providers, ['claude-code', 'codex']);
-    assert.equal(shop?.sessions, 2);
+    assert.deepEqual(shop?.providers, ['claude-code', 'codex', 'qwen-code']);
+    assert.equal(shop?.sessions, 3);
   });
 
   it('groups sessions into cross-tool workstreams', () => {
     const g = store.workstreams();
     const linked = g.workstreams.filter((w) => w.kind === 'linked');
     assert.equal(linked.length, 1);
-    assert.equal(linked[0]!.label, 'session cookies', 'named after the shared feature branch');
-    assert.deepEqual(linked[0]!.providers, ['claude-code', 'codex']);
-    assert.equal(linked[0]!.sessionIds.length, 2);
+    assert.equal(linked[0]!.label, 'session.ts', 'branches differ, so it is named after the shared file');
+    assert.deepEqual(linked[0]!.providers, ['claude-code', 'codex', 'qwen-code']);
+    assert.equal(linked[0]!.sessionIds.length, 3);
     // Every top-level session lands in exactly one group; subagents are left out
     const all = g.workstreams.flatMap((w) => w.sessionIds);
-    assert.equal(all.length, 4);
-    assert.equal(new Set(all).size, 4);
+    assert.equal(all.length, 6);
+    assert.equal(new Set(all).size, 6);
     assert.ok(!all.some((id) => id.includes('/agent-')));
-    assert.equal(g.edges.length, 1);
-    assert.deepEqual(g.edges[0]!.files.sort(), ['/Users/alice/code/acme-shop/src/auth/session.ts']);
+    assert.equal(g.edges.length, 3, 'each pair of the three tools');
+    for (const e of g.edges) assert.deepEqual(e.files, ['/Users/alice/code/acme-shop/src/auth/session.ts']);
     assert.equal(g.sessionWorkstream[linked[0]!.sessionIds[0]!], linked[0]!.id);
   });
 
@@ -276,11 +279,12 @@ describe('Store + indexer', () => {
     const sum = await indexSources(store, cfg.sources);
     assert.equal(sum.removed, 2);
     assert.throws(() => store.resolve('cc:9e8f7c22'), /No session matches/);
-    assert.equal(store.search('RSS').length, 0);
+    assert.equal(store.search('RSS', { provider: 'claude-code' }).length, 0);
+    assert.equal(store.search('RSS', { provider: 'qwen-code' }).length, 1, 'other tools are untouched');
   });
 
   it('does not wipe the index when a whole source folder is missing', async () => {
-    const missing = loadConfig({ home: s.home, claudeDir: '/nope/claude', codexDir: s.codex }, {});
+    const missing = loadConfig({ home: s.home, claudeDir: '/nope/claude', codexDir: s.codex, qwenDir: s.qwen }, {});
     const sum = await indexSources(store, missing.sources);
     assert.equal(sum.removed, 0);
     assert.ok(store.listSessions({ provider: 'cc' }).length > 0);

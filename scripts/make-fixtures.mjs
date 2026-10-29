@@ -2,7 +2,7 @@
 /**
  * Regenerates the synthetic test sessions in fixtures/.
  *
- *   npm run fixtures            (writes fixtures/claude and fixtures/codex)
+ *   npm run fixtures            (writes fixtures/claude, fixtures/codex and fixtures/qwen)
  *   node scripts/make-fixtures.mjs <outDir>
  *
  * The output is deterministic, so running it on an unchanged script changes
@@ -134,5 +134,112 @@ write(`codex/sessions/2025/08/14/rollout-2025-08-14T16-05-11-${cx2}.jsonl`, [
   { type: 'function_call_output', call_id: 'c1', output: JSON.stringify({ output: '', metadata: { exit_code: 0 } }) },
   { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Created migrations/0042_order_status.sql adding a nullable status column.' }] },
 ]);
+
+// ── Qwen Code ────────────────────────────────────────────────────────────
+// Records follow packages/core/src/services/chatRecordingService.ts (ChatRecord).
+const qw1 = '5d2c8e41-7a3b-4c6d-9e0f-1a2b3c4d5e61';
+const qw2 = '8f7e6d5c-4b3a-4291-8e7f-6d5c4b3a2f72';
+let qwUuid = 0;
+const qwBase = (sessionId, cwd, branch, extra = {}) => {
+  let parent = null;
+  return (type, at, fields) => {
+    const uuid = `q-${++qwUuid}`;
+    const rec = { uuid, parentUuid: parent, sessionId, timestamp: at, type, cwd, version: '0.26.3', gitBranch: branch, ...extra, ...fields };
+    parent = uuid;
+    return rec;
+  };
+};
+const q = (t) => `2026-10-28T14:${t}.000Z`;
+const r1 = qwBase(qw1, SHOP, 'feature/rate-limit');
+const usage = (prompt, out, thoughts = 0) => ({ promptTokenCount: prompt, candidatesTokenCount: out, thoughtsTokenCount: thoughts, totalTokenCount: prompt + out + thoughts });
+
+write(`qwen/projects/-Users-alice-code-acme-shop/chats/${qw1}.jsonl`, [
+  r1('user', q('00:00'), {
+    message: { role: 'user', parts: [{ text: 'Add rate limiting to the login endpoint: at most 5 attempts per minute per IP.' }] },
+    systemPayload: { displayText: 'Add rate limiting to the login endpoint: at most 5 attempts per minute per IP.', hookContext: '' },
+    executionContext: { modelId: 'qwen3-coder:30b', authType: 'openai', approvalMode: 'default' },
+  }),
+  r1('assistant', q('00:09'), {
+    model: 'qwen3-coder:30b',
+    message: { role: 'model', parts: [
+      { text: 'internal reasoning, not indexed', thought: true },
+      { text: "I'll look at the login handler first." },
+      { functionCall: { id: 'call_1', name: 'read_file', args: { absolute_path: `${SHOP}/src/auth/login.ts` } } },
+    ] },
+    usageMetadata: usage(9100, 120, 40),
+    contextWindowSize: 262144,
+  }),
+  r1('tool_result', q('00:10'), {
+    message: { role: 'user', parts: [{ functionResponse: { id: 'call_1', name: 'read_file', response: { output: 'export async function login(req, res) { /* … */ }' } } }] },
+    toolCallResult: { callId: 'call_1', status: 'success' },
+  }),
+  r1('assistant', q('00:31'), {
+    model: 'qwen3-coder:30b',
+    message: { role: 'model', parts: [
+      { text: 'Adding a small in-memory limiter and wiring it into the session code.' },
+      { functionCall: { id: 'call_2', name: 'write_file', args: { file_path: `${SHOP}/src/auth/rate-limit.ts`, content: 'export function limiter() {}' } } },
+      { functionCall: { id: 'call_3', name: 'edit', args: { file_path: `${SHOP}/src/auth/session.ts`, old_string: 'login(', new_string: 'limited(login)(' } } },
+    ] },
+    usageMetadata: usage(9800, 300),
+    contextWindowSize: 262144,
+  }),
+  r1('tool_result', q('00:32'), { message: { role: 'user', parts: [{ functionResponse: { id: 'call_2', name: 'write_file', response: { output: 'Created src/auth/rate-limit.ts' } } }] } }),
+  r1('tool_result', q('00:32'), { message: { role: 'user', parts: [{ functionResponse: { id: 'call_3', name: 'edit', response: { output: 'Edited src/auth/session.ts' } } }] } }),
+  r1('system', q('01:00'), { subtype: 'ui_telemetry', systemPayload: { uiEvent: { 'event.name': 'qwen-code.api_response' } } }),
+  r1('system', q('02:00'), { subtype: 'slash_command', systemPayload: { phase: 'invocation', rawCommand: '/compress' } }),
+  r1('system', q('02:05'), { subtype: 'chat_compression', systemPayload: { info: { originalTokenCount: 10100, newTokenCount: 2100, compressionStatus: 1 }, compressedHistory: [] } }),
+  r1('assistant', q('02:30'), {
+    model: 'qwen3-coder:30b',
+    message: { role: 'model', parts: [{ functionCall: { id: 'call_4', name: 'run_shell_command', args: { command: 'npm test -- rate-limit', description: 'Run the limiter tests' } } }] },
+    usageMetadata: usage(2600, 80),
+    contextWindowSize: 262144,
+  }),
+  r1('tool_result', q('02:41'), { message: { role: 'user', parts: [{ functionResponse: { id: 'call_4', name: 'run_shell_command', response: { output: 'PASS src/auth/rate-limit.test.ts (3 tests)' } } }] } }),
+  r1('user', q('03:00'), { subtype: 'notification', message: { role: 'user', parts: [{ text: '<task-notification>background task finished</task-notification>' }] }, systemPayload: { displayText: 'Background task finished' } }),
+  r1('user', q('03:10'), { message: { role: 'user', parts: [{ text: 'Also return a Retry-After header.' }] } }),
+  r1('assistant', q('03:22'), {
+    model: 'qwen3-coder:30b',
+    message: { role: 'model', parts: [{ text: 'Done: 429 responses now include Retry-After with the seconds left in the window.' }] },
+    usageMetadata: usage(3100, 60),
+    contextWindowSize: 262144,
+  }),
+  '{"uuid":"q-truncated","type":"assistant","message":{"role":"mod',
+]);
+
+// A background subagent of that session
+const r1a = qwBase(qw1, SHOP, 'feature/rate-limit', { agentId: 'explore-7f3c', agentName: 'Explore', isSidechain: true });
+write(`qwen/projects/-Users-alice-code-acme-shop/subagents/${qw1}/agent-explore-7f3c.jsonl`, [
+  r1a('user', q('00:12'), { subtype: 'agent_launch_prompt', message: { role: 'user', parts: [{ text: 'Find every place that reads the auth cookie.' }] } }),
+  r1a('user', q('00:12'), { message: { role: 'user', parts: [{ text: 'Find every place that reads the auth cookie.' }] } }),
+  r1a('assistant', q('00:15'), {
+    model: 'qwen3-coder:30b',
+    message: { role: 'model', parts: [{ functionCall: { id: 'sa_1', name: 'grep_search', args: { pattern: 'readSessionCookie' } } }] },
+    usageMetadata: usage(4200, 30),
+  }),
+  r1a('tool_result', q('00:16'), { message: { role: 'user', parts: [{ functionResponse: { id: 'sa_1', name: 'grep_search', response: { output: 'src/auth/session.ts:12\nsrc/auth/refresh.ts:8' } } }] } }),
+  r1a('assistant', q('00:18'), {
+    model: 'qwen3-coder:30b',
+    message: { role: 'model', parts: [{ text: 'Two places: src/auth/session.ts and src/auth/refresh.ts.' }] },
+    usageMetadata: usage(4400, 25),
+  }),
+]);
+write(`qwen/projects/-Users-alice-code-acme-shop/subagents/${qw1}/agent-explore-7f3c.meta.json`, [
+  { agentId: 'explore-7f3c', agentType: 'Explore', description: 'Find cookie reads', parentSessionId: qw1, parentAgentId: null, createdAt: q('00:12') },
+]);
+
+// DeepSeek through Qwen Code, in another project, renamed with /rename
+const r2 = qwBase(qw2, BLOG, 'main');
+write(`qwen/projects/-Users-alice-code-blog/chats/${qw2}.jsonl`, [
+  r2('user', '2026-10-25T19:00:00.000Z', { message: { role: 'user', parts: [{ text: 'Generate an RSS feed for the posts folder.' }] } }),
+  r2('assistant', '2026-10-25T19:00:20.000Z', {
+    model: 'deepseek-chat',
+    message: { role: 'model', parts: [{ text: 'I added scripts/rss.mjs, which writes public/feed.xml from posts/*.md.' }, { functionCall: { id: 'd1', name: 'write_file', args: { file_path: `${BLOG}/scripts/rss.mjs`, content: '// rss' } } }] },
+    usageMetadata: usage(5300, 410),
+    contextWindowSize: 131072,
+  }),
+  r2('tool_result', '2026-10-25T19:00:21.000Z', { message: { role: 'user', parts: [{ functionResponse: { id: 'd1', name: 'write_file', response: { output: 'Created scripts/rss.mjs' } } }] } }),
+  r2('system', '2026-10-25T19:05:00.000Z', { subtype: 'custom_title', systemPayload: { customTitle: 'RSS feed for the blog', titleSource: 'manual' } }),
+]);
+write(`qwen/projects/-Users-alice-code-blog/chats/${qw2}.runtime.json`, [{ pid: 4242 }]);
 
 console.log('fixtures written to', root);

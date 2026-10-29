@@ -8,7 +8,7 @@ const s = scratch();
 const BIN = join(REPO, 'bin/contextdeck.js');
 
 function run(...args: string[]) {
-  const r = spawnSync(process.execPath, [BIN, '--home', s.home, '--claude-dir', s.claude, '--codex-dir', s.codex, ...args], {
+  const r = spawnSync(process.execPath, [BIN, '--home', s.home, '--claude-dir', s.claude, '--codex-dir', s.codex, '--qwen-dir', s.qwen, ...args], {
     encoding: 'utf8',
     env: { ...process.env, NO_COLOR: '1' },
   });
@@ -27,13 +27,13 @@ describe('cli', () => {
     const r = run('index', '--json');
     assert.equal(r.code, 0, r.err);
     const sum = JSON.parse(r.out);
-    assert.equal(sum.indexed, 5);
+    assert.equal(sum.indexed, 8);
     assert.equal(r.err, '', 'no experimental-warning noise on stderr');
   });
 
   it('list --json returns sessions', () => {
     const rows = JSON.parse(run('list', '--json').out);
-    assert.equal(rows.length, 4);
+    assert.equal(rows.length, 6);
     assert.ok(rows[0].shortId);
   });
 
@@ -64,7 +64,7 @@ describe('cli', () => {
   it('related, projects, stats and doctor succeed', () => {
     assert.match(run('related', 'cc:0f3a1b11').out, /1 shared file/);
     assert.match(run('projects').out, /acme-shop/);
-    assert.equal(JSON.parse(run('stats', '--json').out).sessions, 4);
+    assert.equal(JSON.parse(run('stats', '--json').out).sessions, 6);
     assert.equal(run('doctor').code, 0);
   });
 
@@ -82,6 +82,7 @@ describe('cli', () => {
     );
     assert.equal(JSON.parse(run('handoff', 'cx:d5e6f701', '--json').out).command.startsWith('claude '), true);
     assert.equal(JSON.parse(run('handoff', 'cc:0f3a1b11', '--to', 'cc', '--json').out).command.startsWith('claude '), true);
+    assert.equal(JSON.parse(run('handoff', 'cc:0f3a1b11', '--to', 'qw', '--json').out).command.startsWith('qwen -i '), true);
     assert.equal(run('handoff', 'cc:0f3a1b11', '--to', 'gemini').code, 2);
     assert.equal(run('handoff').code, 2);
   });

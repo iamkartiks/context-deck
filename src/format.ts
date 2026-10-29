@@ -17,6 +17,7 @@ export const c = {
 const PROVIDER_COLOR: Record<string, (s: string) => string> = {
   'claude-code': c.yellow,
   codex: c.cyan,
+  'qwen-code': c.magenta,
 };
 
 export function providerLabel(provider: string): string {

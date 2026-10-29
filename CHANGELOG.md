@@ -4,6 +4,22 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-29
+
+Qwen Code, and with it local and open models.
+
+### Added
+
+- **Qwen Code adapter.** Reads `~/.qwen/projects/*/chats/*.jsonl` (or `QWEN_RUNTIME_DIR` / `QWEN_HOME`, or `--qwen-dir` / `CONTEXTDECK_QWEN_DIR`), including background subagents. Sessions show their model (a local Qwen through Ollama, DeepSeek, …), tokens, the real context window, compactions, files changed, and `/rename` titles. Typed prompts are kept separate from notifications and hidden reasoning. Short ids look like `qw:3c4d5e61`.
+- **Handoff to and from Qwen Code.** `qwen -i "<brief>"` starts it with the brief and keeps the session open; `contextdeck handoff <id> --to qw`. The composer explains that where the brief goes depends on the model Qwen Code is set up with.
+- **Resume** with `qwen --resume <id>`, from the CLI or the canvas.
+- Qwen Code cards on the canvas: violet, with a diamond marker.
+- Qwen fixtures in `npm run fixtures`, and Qwen sessions in the demo data.
+
+### Changed
+
+- Handoff briefs leave out Qwen Code's plain reads and searches, as they already did for Claude Code.
+
 ## [0.5.0] - 2026-10-29
 
 Windows and Linux, a smaller index, and an exact Codex compaction count.

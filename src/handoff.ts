@@ -146,7 +146,7 @@ export function buildBrief(store: Store, ref: string, opts: BriefOptions): Brief
   const replies = messages.filter((m) => m.role === 'assistant');
   // Tool calls (not their results), leaving out pure reads and searches, which are noise here
   const calls = messages.filter(
-    (m) => m.role === 'tool' && !/^[\w.-]+ result:/.test(m.text) && !/^(Read|Grep|Glob|LS|WebFetch|WebSearch|TodoWrite):/.test(m.text),
+    (m) => m.role === 'tool' && !/^[\w.-]+ result:/.test(m.text) && !/^(Read|Grep|Glob|LS|WebFetch|WebSearch|TodoWrite|read_file|read_many_files|grep_search|glob|list_directory|web_fetch|web_search|todo_write):/.test(m.text),
   );
   const files = store.filesTouched(from.id);
 

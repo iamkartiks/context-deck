@@ -42,7 +42,7 @@ ${c.bold('Commands')}
   doctor              Check paths, Node features and parse errors
 
 ${c.bold('Common options')}
-  -p, --provider <id>   Only this tool: claude-code (cc) or codex (cx)
+  -p, --provider <id>   Only this tool: claude-code (cc), codex (cx) or qwen-code (qw)
       --project <name>  Only sessions in this project (folder name or full path)
   -n, --limit <n>       How many results (default 30)
       --json            Machine-readable output (stable; this is what the UI will use)
@@ -52,9 +52,11 @@ ${c.bold('Paths')} (flag > env var > default)
       --home <dir>        Index location       CONTEXTDECK_HOME        ~/.contextdeck
       --claude-dir <dir>  Claude Code dir      CONTEXTDECK_CLAUDE_DIR  $CLAUDE_CONFIG_DIR or ~/.claude
       --codex-dir <dir>   Codex dir            CONTEXTDECK_CODEX_DIR   $CODEX_HOME or ~/.codex
+      --qwen-dir <dir>    Qwen Code dir        CONTEXTDECK_QWEN_DIR    $QWEN_RUNTIME_DIR, $QWEN_HOME or ~/.qwen
 
 ${c.bold('Handoff options')}
-  -t, --to <tool>       Tool to continue in: codex (cx) or claude-code (cc). Default: the other tool
+  -t, --to <tool>       Tool to continue in: codex (cx), claude-code (cc) or qwen-code (qw).
+                        Default: Codex, or Claude Code when handing off from Codex
       --print           Only print the brief
       --run             Start the new session right here in this terminal
       --no-check-in     Let the new agent carry on without checking in first
@@ -95,6 +97,7 @@ const OPTIONS = {
   home: { type: 'string' },
   'claude-dir': { type: 'string' },
   'codex-dir': { type: 'string' },
+  'qwen-dir': { type: 'string' },
 } as const;
 
 type Values = ReturnType<typeof parseArgs<{ options: typeof OPTIONS; allowPositionals: true }>>['values'];
@@ -354,11 +357,11 @@ async function cmdWatch(cfg: Config, store: Store, v: Values): Promise<void> {
 
 async function cmdHandoff(cfg: Config, store: Store, v: Values, args: string[]): Promise<void> {
   const ref = args[0];
-  if (!ref) throw new UsageError('Usage: contextdeck handoff <id> [--to codex|claude-code] [--print | --run]');
+  if (!ref) throw new UsageError('Usage: contextdeck handoff <id> [--to codex|claude-code|qwen-code] [--print | --run]');
   const from = store.resolve(ref);
   const to = v.to ? adapterByPrefix(v.to)?.id : from.provider === 'codex' ? 'claude-code' : 'codex';
   const target = to ? getAdapter(to) : undefined;
-  if (!to || !target?.startCommand) throw new UsageError(`Unknown tool "${v.to}". Use codex (cx) or claude-code (cc).`);
+  if (!to || !target?.startCommand) throw new UsageError(`Unknown tool "${v.to}". Use codex (cx), claude-code (cc) or qwen-code (qw).`);
 
   const brief = buildBrief(store, from.id, { to, checkIn: !v['no-check-in'], home: cfg.home });
   if (v.print) {
@@ -438,6 +441,8 @@ function cmdStats(cfg: Config, store: Store, v: Values): void {
   });
 }
 
+const DIR_FLAG: Record<string, string> = { 'claude-code': 'claude', codex: 'codex', 'qwen-code': 'qwen' };
+
 async function cmdDoctor(cfg: Config, store: Store, v: Values): Promise<void> {
   let fts5 = false;
   try {
@@ -487,7 +492,7 @@ async function cmdDoctor(cfg: Config, store: Store, v: Values): Promise<void> {
       ...sources.map(
         (s) =>
           `${ok(s.exists)} ${s.label.padEnd(12)} ${s.root} ${c.dim(
-            s.exists ? `(${s.files} session files)` : `(not found — set ${s.envVar} or --${s.provider === 'codex' ? 'codex' : 'claude'}-dir)`,
+            s.exists ? `(${s.files} session files)` : `(not found — set ${s.envVar} or --${DIR_FLAG[s.provider] ?? s.provider}-dir)`,
           )}`,
       ),
     ];
@@ -523,7 +528,7 @@ export async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
-  const cfg = loadConfig({ home: v.home, claudeDir: v['claude-dir'], codexDir: v['codex-dir'] });
+  const cfg = loadConfig({ home: v.home, claudeDir: v['claude-dir'], codexDir: v['codex-dir'], qwenDir: v['qwen-dir'] });
   let store: Store | null = null;
   try {
     store = new Store(cfg.dbPath);

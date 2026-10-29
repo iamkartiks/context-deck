@@ -50,6 +50,7 @@
 
   --accent: #f4c95d; /* Claude Code fill, glows */
   --codex: #b7b3aa; /* Codex fill */
+  --qwen: #b4a7e6; /* Qwen Code fill */
   --other: #d3cfc6; /* any other tool */
   --glow-opacity: 0.6;
 
@@ -79,6 +80,7 @@
     --dots: rgba(236, 235, 230, 0.13);
     --zone: rgba(38, 38, 36, 0.6);
     --codex: #b7b3aa;
+    --qwen: #a596dc;
     --glow-opacity: 0.32;
     color-scheme: dark;
   }
@@ -359,6 +361,17 @@ code {
 
 [data-tool="codex"] {
   --fill: var(--codex);
+}
+
+[data-tool="qwen-code"] {
+  --fill: var(--qwen);
+}
+
+/* A diamond, so the three tools differ by shape as well as colour */
+[data-tool="qwen-code"] .swatch,
+.swatch[data-tool="qwen-code"] {
+  border-radius: 1px;
+  transform: rotate(45deg) scale(0.86);
 }
 
 .count {

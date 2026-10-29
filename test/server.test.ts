@@ -53,7 +53,7 @@ function call(
 
 describe('ui server', () => {
   const s = scratch();
-  const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex }, {});
+  const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex, qwenDir: s.qwen }, {});
   let store: Store;
   let server: UiServer;
   const launched: string[] = [];
@@ -111,18 +111,23 @@ describe('ui server', () => {
 
   it('returns the board: sessions, workstreams and cross-tool links', async () => {
     const b = (await call(server.port, '/api/board')).json();
-    assert.equal(b.sessions.length, 4);
+    assert.equal(b.sessions.length, 6);
     assert.deepEqual(
-      b.providers.map((p: { id: string }) => p.id),
-      ['claude-code', 'codex'],
+      b.providers.map((p: { id: string; label: string }) => [p.id, p.label]),
+      [
+        ['claude-code', 'Claude Code'],
+        ['codex', 'Codex CLI'],
+        ['qwen-code', 'Qwen Code'],
+      ],
     );
     const ws = b.workstreams.find((w: { kind: string }) => w.kind === 'linked');
-    assert.equal(ws.label, 'session cookies');
-    assert.deepEqual(ws.providers, ['claude-code', 'codex']);
-    assert.equal(b.edges.length, 1);
+    assert.equal(ws.label, 'session.ts');
+    assert.deepEqual(ws.providers, ['claude-code', 'codex', 'qwen-code']);
+    assert.equal(b.edges.length, 3);
     assert.equal(b.subagentCounts['claude-code:7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11'], 1);
+    assert.equal(b.subagentCounts['qwen-code:5d2c8e41-7a3b-4c6d-9e0f-1a2b3c4d5e61'], 1);
     assert.equal(b.capabilities.openTerminal, true);
-    assert.equal(b.sources.length, 2);
+    assert.equal(b.sources.length, 3);
   });
 
   it('returns one session with its resume command and related work', async () => {
@@ -130,7 +135,7 @@ describe('ui server', () => {
     assert.equal(r.status, 200);
     const d = r.json();
     assert.equal(d.resume.shell, 'cd /Users/alice/code/acme-shop && claude --resume 7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11');
-    assert.equal(d.related[0].session.provider, 'codex');
+    assert.deepEqual(d.related.map((r: { session: { provider: string } }) => r.session.provider), ['qwen-code', 'codex']);
     assert.equal(d.subagents.length, 1);
     assert.ok(d.messages.length > 0);
     assert.deepEqual(d.contextSeries, { points: [16_500, 19_500, 44_000], compactions: [2] });
@@ -139,7 +144,7 @@ describe('ui server', () => {
 
   it('searches', async () => {
     const d = (await call(server.port, '/api/search?q=cookie')).json();
-    assert.equal(d.hits.length, 2);
+    assert.equal(d.hits.length, 3);
     assert.deepEqual((await call(server.port, '/api/search?q=')).json().hits, []);
   });
 
@@ -205,7 +210,7 @@ describe('ui server', () => {
     const caps = (await call(server.port, '/api/board')).json().capabilities;
     assert.deepEqual(
       caps.handoffTargets.map((t: { id: string }) => t.id),
-      ['claude-code', 'codex'],
+      ['claude-code', 'codex', 'qwen-code'],
     );
   });
 
@@ -303,7 +308,7 @@ describe('ui server', () => {
 describe('ui server on other platforms', () => {
   it('says when no terminal can be opened (Linux without a terminal app or display)', async () => {
     const s = scratch();
-    const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex }, {});
+    const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex, qwenDir: s.qwen }, {});
     const store = new Store(cfg.dbPath);
     await indexSources(store, cfg.sources);
     const launches: unknown[] = [];
@@ -338,7 +343,7 @@ describe('ui server on other platforms', () => {
 
   it('gives PowerShell commands and a pointer prompt on Windows', async () => {
     const s = scratch();
-    const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex }, {});
+    const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex, qwenDir: s.qwen }, {});
     const store = new Store(cfg.dbPath);
     await indexSources(store, cfg.sources);
     const launches: unknown[] = [];
@@ -377,7 +382,7 @@ describe('ui server on other platforms', () => {
 
   it('reports a launcher failure instead of failing silently', async () => {
     const s = scratch();
-    const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex }, {});
+    const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex, qwenDir: s.qwen }, {});
     const store = new Store(cfg.dbPath);
     await indexSources(store, cfg.sources);
     const launches: unknown[] = [];

@@ -4,6 +4,7 @@ import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, wri
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { codexAdapter } from '../src/adapters/codex.js';
+import { qwenCodeAdapter } from '../src/adapters/qwen-code.js';
 import { loadConfig } from '../src/config.js';
 import { buildBrief, finalizeBrief, MAX_BRIEF_CHARS, pointerPrompt, saveBrief, startLaunch } from '../src/handoff.js';
 import { ensureMarker, handoffMarker, newHandoffId, parseHandoffMarker } from '../src/handoff-marker.js';
@@ -57,7 +58,7 @@ describe('handoff marker', () => {
 
 describe('handoff', () => {
   const s = scratch();
-  const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex }, {});
+  const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex, qwenDir: s.qwen }, {});
   let store: Store;
 
   before(async () => {
@@ -163,6 +164,26 @@ describe('handoff', () => {
     assert.match(second.text, /## The goal\n\nOur auth stores the JWT in localStorage/, 'goal read from the saved brief');
     const withoutHome = buildBrief(store, target.id, { to: 'claude-code' });
     assert.match(withoutHome.text, /## The goal\n\nContinue: Move auth/, 'falls back to the pointer itself');
+  });
+
+  it('hands off to and from Qwen Code', () => {
+    const toQwen = buildBrief(store, 'cc:0f3a1b11', { to: 'qwen-code' });
+    assert.equal(toQwen.toLabel, 'Qwen Code');
+    assert.equal(toQwen.targetWindow, null, 'depends on the model Qwen Code is set up with');
+    const from = { ...store.resolve('cc:0f3a1b11'), cwd: null };
+    assert.equal(
+      commandText(startLaunch(qwenCodeAdapter, from, '/tmp/b.md', toQwen.handoffId, 'linux'), 'linux'),
+      `qwen -i "$(cat /tmp/b.md)"`,
+      'interactive, so the session stays open after the brief',
+    );
+
+    const fromQwen = buildBrief(store, 'qw:3c4d5e61', { to: 'claude-code' }).text;
+    assert.match(fromQwen, /started in Qwen Code/);
+    assert.match(fromQwen, /\(qwen3-coder:30b\)/);
+    assert.match(fromQwen, /- run_shell_command: \$ npm test -- rate-limit/);
+    assert.doesNotMatch(fromQwen, /- read_file:/, 'plain file reads are left out');
+    assert.match(fromQwen, /- src\/auth\/rate-limit\.ts/);
+    assert.match(fromQwen, /compacted once/);
   });
 
   it('stays within the size budget for very long sessions', async () => {

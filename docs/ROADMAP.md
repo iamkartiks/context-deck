@@ -8,7 +8,8 @@ Claude Code + Codex adapters, unified schema, SQLite + full-text search, increme
 
 ## Phase 2: more agents and a sturdier index
 
-- [ ] Adapters: **Gemini CLI**, **OpenCode**, **Cursor** (SQLite store), **Aider**, **GitHub Copilot CLI**
+- [x] **Qwen Code** adapter (v0.6): Qwen and any OpenAI-compatible model, local or hosted (DeepSeek, …)
+- [ ] Adapters: **Gemini CLI**, **OpenCode**, **Aider**, **Goose**, **Cline / Roo** (VS Code), **Cursor** (SQLite store), **GitHub Copilot CLI**
 - [ ] Resume parsing from the last byte offset for append-only files (cheap re-index of huge live sessions)
 - [ ] Resolve git roots so subfolders of one repo group together
 - [ ] Put session titles in the full-text index
@@ -46,7 +47,8 @@ Still to do here:
 
 - [x] "Continue in another tool": a brief built from the session (goal, instructions, where it got to, files, commands), editable before launch, starts a new session in the other tool and is linked back to the original (v0.4)
 - [x] "Fresh session" in the same tool when a window is nearly full (v0.4)
-- [ ] Optional AI-written brief: ask the source tool to summarise its own session (`claude -p` / `codex exec`), for long sessions where decisions are buried mid-conversation
+- [ ] Optional AI-written brief: ask the source tool to summarise its own session (`claude -p` / `codex exec`), or a local model through Ollama so nothing leaves the machine, for long sessions where decisions are buried mid-conversation
+- [x] Hand off to and from Qwen Code (v0.6)
 - [ ] Hand off to more tools as their adapters arrive (Gemini CLI, OpenCode, Aider)
 - [ ] Handoff from a range of messages, not just the whole session
 - [ ] Hooks for live status ("waiting for you", "done") from tools that support them

@@ -61,7 +61,7 @@ Run `npm run demo:ui` and edit files in `ui/`. The server reads them on every re
 
 ## Format changes (the most common bug)
 
-Claude Code and Codex change their on-disk formats without notice. When something breaks:
+Claude Code, Codex and Qwen Code change their on-disk formats without notice. When something breaks:
 
 1. Run `contextdeck doctor` to find the failing file.
 2. Find the line shape that's new or changed.

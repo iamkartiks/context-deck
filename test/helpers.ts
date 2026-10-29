@@ -8,6 +8,7 @@ export const REPO = fileURLToPath(new URL('../../', import.meta.url));
 export const FIXTURES = join(REPO, 'fixtures');
 export const CLAUDE_FIXTURES = join(FIXTURES, 'claude');
 export const CODEX_FIXTURES = join(FIXTURES, 'codex');
+export const QWEN_FIXTURES = join(FIXTURES, 'qwen');
 
 export const CC_MAIN = join(
   CLAUDE_FIXTURES,
@@ -31,11 +32,20 @@ export const CX_LEGACY = join(
 );
 
 /** A scratch dir with a private copy of the fixtures, so tests can modify them. */
-export function scratch(): { dir: string; claude: string; codex: string; home: string; cleanup: () => void } {
+export const QW_MAIN = join(QWEN_FIXTURES, 'projects/-Users-alice-code-acme-shop/chats/5d2c8e41-7a3b-4c6d-9e0f-1a2b3c4d5e61.jsonl');
+export const QW_SUBAGENT = join(
+  QWEN_FIXTURES,
+  'projects/-Users-alice-code-acme-shop/subagents/5d2c8e41-7a3b-4c6d-9e0f-1a2b3c4d5e61/agent-explore-7f3c.jsonl',
+);
+export const QW_DEEPSEEK = join(QWEN_FIXTURES, 'projects/-Users-alice-code-blog/chats/8f7e6d5c-4b3a-4291-8e7f-6d5c4b3a2f72.jsonl');
+
+export function scratch(): { dir: string; claude: string; codex: string; qwen: string; home: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'contextdeck-test-'));
   const claude = join(dir, 'claude');
   const codex = join(dir, 'codex');
   cpSync(CLAUDE_FIXTURES, claude, { recursive: true });
+  const qwen = join(dir, 'qwen');
   cpSync(CODEX_FIXTURES, codex, { recursive: true });
-  return { dir, claude, codex, home: join(dir, 'home'), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  cpSync(QWEN_FIXTURES, qwen, { recursive: true });
+  return { dir, claude, codex, qwen, home: join(dir, 'home'), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
