@@ -86,6 +86,12 @@ async function parse(filePath: string): Promise<ParseResult> {
   let firstItemPrompt: string | null = null;
   let firstEventPrompt: string | null = null;
   let threadName: string | null = null;
+  // One compaction is always saved as a `compacted` record. Older ("legacy")
+  // rollouts also save a `context_compacted` event for the same compaction
+  // (codex-rs/rollout/src/policy.rs), so the events only count when a file
+  // has no `compacted` records at all.
+  const compactedPoints: number[] = [];
+  const compactedEventPoints: number[] = [];
 
   const add = (list: typeof items, role: (typeof items)[number]['role'], text: string, ts: unknown, toolName?: string) => {
     if (!text) return;
@@ -196,8 +202,7 @@ async function parse(filePath: string): Promise<ParseResult> {
         handleItem(payload, ts);
         break;
       case 'compacted':
-        s.compactions++;
-        s.compactionPoints.push(s.contextSeries.length);
+        compactedPoints.push(s.contextSeries.length);
         break;
       case 'event_msg': {
         const ev = payload.type;
@@ -229,8 +234,7 @@ async function parse(filePath: string): Promise<ParseResult> {
             add(events, 'assistant', clean(text), ts);
           }
         } else if (ev === 'context_compacted') {
-          s.compactions++;
-          s.compactionPoints.push(s.contextSeries.length);
+          compactedEventPoints.push(s.contextSeries.length);
         }
         break;
       }
@@ -238,6 +242,9 @@ async function parse(filePath: string): Promise<ParseResult> {
         break;
     }
   }
+
+  s.compactionPoints = compactedPoints.length ? compactedPoints : compactedEventPoints;
+  s.compactions = s.compactionPoints.length;
 
   const hasItemMessages = itemUserTurns + itemAssistantTurns > 0;
   if (hasItemMessages) {
