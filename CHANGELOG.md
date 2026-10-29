@@ -4,6 +4,25 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-29
+
+Handoff: continue a session's work in another tool.
+
+### Added
+
+- **Continue in another tool** from the session panel (Codex ↔ Claude Code), or **Fresh session** in the same tool when a window is nearly full.
+- A brief is written from the indexed session: goal, later instructions, where it got to, files changed, recent commands, and how to pick up safely. It is shown in an editor with its size and share of the new window, plus a note when it will go to a different company.
+- **Open in Terminal** (macOS) or **Copy command** starts the new session in the project folder with the brief as its first message. Briefs are saved to `~/.contextdeck/handoffs/` (owner-only).
+- The new session is linked to the one it continues by a marker in the brief: same workstream, a dashed thread on the canvas, and "continues this session" in both panels. Links survive rebuilding the index.
+- `contextdeck handoff <id> [--to …] [--print | --run] [--no-check-in]`.
+- Index schema v3 (`handoff_id`, `handoff_from`); older indexes upgrade themselves.
+- 22 new tests (107 total), including one that proves a brief full of shell syntax reaches the tool as plain text.
+
+### Changed
+
+- Session titles drop a leading markdown heading marker.
+- The background is made inert while a dialog is open.
+
 ## [0.3.0] - 2026-10-29
 
 A new look, from the "minimal organiser" design.

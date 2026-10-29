@@ -2,6 +2,7 @@ import { mkdirSync, statSync } from 'node:fs';
 import { basename, dirname, posix, win32 } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { adapterByPrefix, getAdapter } from './adapters/index.js';
+import { parseHandoffMarker } from './handoff-marker.js';
 import type { ContextSeries, NormalizedSession, ProviderId, SessionRow } from './schema.js';
 
 /**
@@ -11,7 +12,7 @@ import type { ContextSeries, NormalizedSession, ProviderId, SessionRow } from '.
  * from the providers' own session files, which are never modified.
  */
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 /** Longest context series kept per session; longer ones are downsampled. */
 const MAX_SERIES_POINTS = 120;
@@ -70,6 +71,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   context_window  INTEGER,
   compactions     INTEGER NOT NULL,
   context_series  TEXT,
+  handoff_id      TEXT,
+  handoff_from    TEXT,
   parent_id       TEXT,
   is_subagent     INTEGER NOT NULL,
   source_path     TEXT NOT NULL
@@ -134,7 +137,7 @@ export interface ProjectRow {
 export interface RelatedRow {
   session: SessionRow;
   sharedFiles: string[];
-  reason: 'shared-files' | 'same-branch';
+  reason: 'shared-files' | 'same-branch' | 'continued-from' | 'continued-in';
 }
 
 export interface StoredMessage {
@@ -210,6 +213,8 @@ function toSessionRow(r: Row): SessionRow {
     parentId: (r.parent_id as string | null) ?? null,
     isSubagent: Number(r.is_subagent) === 1,
     sourcePath: String(r.source_path),
+    handoffId: (r.handoff_id as string | null) ?? null,
+    handoffFrom: (r.handoff_from as string | null) ?? null,
   };
 }
 
@@ -234,15 +239,18 @@ export class Store {
         `Index at ${this.path} was created by a newer contextdeck (schema ${current}). Upgrade, or delete the file to rebuild.`,
       );
     }
-    if (current > 0 && current < 2) {
-      // v2 adds the context-over-time series. The index is a cache, so the
-      // simplest correct upgrade is to add the column and re-read every file.
-      const cols = this.db.prepare(`PRAGMA table_info(sessions)`).all() as Row[];
-      if (!cols.some((c) => c.name === 'context_series')) {
-        this.db.exec(`ALTER TABLE sessions ADD COLUMN context_series TEXT`);
+    if (current > 0 && current < SCHEMA_VERSION) {
+      // v2 added the context-over-time series, v3 the handoff link. The index
+      // is a cache, so the simplest correct upgrade is to add any missing
+      // columns and re-read every file.
+      const cols = new Set((this.db.prepare(`PRAGMA table_info(sessions)`).all() as Row[]).map((c) => String(c.name)));
+      for (const col of ['context_series', 'handoff_id', 'handoff_from']) {
+        if (!cols.has(col)) this.db.exec(`ALTER TABLE sessions ADD COLUMN ${col} TEXT`);
       }
       this.db.exec(`DELETE FROM messages_fts; DELETE FROM messages; DELETE FROM session_files; DELETE FROM sessions; DELETE FROM files;`);
     }
+    // Created after the upgrade above so the column exists on older indexes
+    this.db.exec(`CREATE INDEX IF NOT EXISTS sessions_handoff ON sessions(handoff_from)`);
     this.db
       .prepare(`INSERT INTO meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
       .run(String(SCHEMA_VERSION));
@@ -340,6 +348,9 @@ export class Store {
     const id = `${s.provider}:${s.nativeId}`;
     const parentId = s.parentNativeId ? `${s.provider}:${s.parentNativeId}` : null;
     const project = s.cwd ? basename(s.cwd) || s.cwd : null;
+    // A session started from a ContextDeck handoff carries a marker in its first prompt
+    const firstPrompt = s.messages.find((m) => m.role === 'user');
+    const handoff = firstPrompt ? parseHandoffMarker(firstPrompt.text) : null;
 
     this.tx(() => {
       const prev = this.fileState(path);
@@ -350,8 +361,9 @@ export class Store {
         .prepare(
           `INSERT INTO sessions(id, provider, native_id, short_id, title, cwd, project, git_branch, model, cli_version,
              started_at, updated_at, message_count, user_turns, assistant_turns, tool_calls, tokens_in, tokens_out,
-             context_tokens, context_window, compactions, context_series, parent_id, is_subagent, source_path)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             context_tokens, context_window, compactions, context_series, parent_id, is_subagent, source_path,
+             handoff_id, handoff_from)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET provider = excluded.provider, native_id = excluded.native_id,
              short_id = excluded.short_id, title = excluded.title, cwd = excluded.cwd, project = excluded.project,
              git_branch = excluded.git_branch, model = excluded.model, cli_version = excluded.cli_version,
@@ -361,7 +373,8 @@ export class Store {
              tokens_in = excluded.tokens_in, tokens_out = excluded.tokens_out,
              context_tokens = excluded.context_tokens, context_window = excluded.context_window,
              compactions = excluded.compactions, context_series = excluded.context_series, parent_id = excluded.parent_id,
-             is_subagent = excluded.is_subagent, source_path = excluded.source_path`,
+             is_subagent = excluded.is_subagent, source_path = excluded.source_path,
+             handoff_id = excluded.handoff_id, handoff_from = excluded.handoff_from`,
         )
         .run(
           id,
@@ -389,6 +402,8 @@ export class Store {
           parentId,
           s.isSubagent ? 1 : 0,
           path,
+          handoff?.id ?? null,
+          handoff && handoff.from !== id ? handoff.from : null,
         );
 
       const insMsg = this.db.prepare(
@@ -584,23 +599,36 @@ export class Store {
          GROUP BY s.id ORDER BY n DESC, s.updated_at DESC LIMIT ?`,
       )
       .all(sessionId, limit) as Row[];
-    const out: RelatedRow[] = rows.map((r) => ({
-      session: toSessionRow(r),
-      sharedFiles: String(r.shared ?? '')
+    // Handoffs first: the session this one continued, and sessions that continued it
+    const out: RelatedRow[] = [];
+    const self = this.db.prepare(`SELECT handoff_from FROM sessions WHERE id = ?`).get(sessionId) as Row | undefined;
+    if (self?.handoff_from) {
+      const from = this.db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(String(self.handoff_from)) as Row | undefined;
+      if (from) out.push({ session: toSessionRow(from), sharedFiles: [], reason: 'continued-from' });
+    }
+    for (const r of this.db
+      .prepare(`SELECT * FROM sessions WHERE handoff_from = ? ORDER BY started_at`)
+      .all(sessionId) as Row[]) {
+      out.push({ session: toSessionRow(r), sharedFiles: [], reason: 'continued-in' });
+    }
+    for (const r of rows) {
+      const shared = String(r.shared ?? '')
         .split(',')
-        .filter(Boolean),
-      reason: 'shared-files',
-    }));
+        .filter(Boolean);
+      const existing = out.find((o) => o.session.id === String(r.id));
+      if (existing) existing.sharedFiles = shared;
+      else out.push({ session: toSessionRow(r), sharedFiles: shared, reason: 'shared-files' });
+    }
     if (out.length < limit) {
-      const self = this.db.prepare(`SELECT cwd, git_branch FROM sessions WHERE id = ?`).get(sessionId) as Row | undefined;
-      if (self?.cwd && self.git_branch) {
+      const me = this.db.prepare(`SELECT cwd, git_branch FROM sessions WHERE id = ?`).get(sessionId) as Row | undefined;
+      if (me?.cwd && me.git_branch) {
         const seen = new Set([sessionId, ...out.map((o) => o.session.id)]);
         const more = this.db
           .prepare(
             `SELECT * FROM sessions WHERE cwd = ? AND git_branch = ? AND is_subagent = 0
              ORDER BY updated_at DESC LIMIT ?`,
           )
-          .all(self.cwd, self.git_branch, limit + seen.size) as Row[];
+          .all(me.cwd, me.git_branch, limit + seen.size) as Row[];
         for (const r of more) {
           if (out.length >= limit) break;
           if (seen.has(String(r.id))) continue;
@@ -608,7 +636,7 @@ export class Store {
         }
       }
     }
-    return out;
+    return out.slice(0, limit);
   }
 
   stats(): {
@@ -734,7 +762,16 @@ export class Store {
       }
     }
 
-    // 2. Same folder + same feature branch
+    // 2. Handoffs: a session continued in another tool is the same piece of work
+    const handoffPairs: [string, string][] = [];
+    for (const s of sessions) {
+      if (s.handoffFrom && byId.has(s.handoffFrom)) {
+        union(s.handoffFrom, s.id);
+        handoffPairs.push([s.handoffFrom, s.id]);
+      }
+    }
+
+    // 3. Same folder + same feature branch
     const byBranch = new Map<string, string[]>();
     for (const s of sessions) {
       if (!s.cwd || !s.gitBranch || TRUNK_BRANCHES.has(s.gitBranch)) continue;
@@ -817,9 +854,11 @@ export class Store {
       edges.push({
         a,
         b,
+        kind: 'files',
         files: [...files].map((abs) => sessionsByFile.get(abs)?.path ?? abs).sort(),
       });
     }
+    for (const [a, b] of handoffPairs) edges.push({ a, b, kind: 'handoff', files: [] });
 
     const sessionWorkstream: Record<string, string> = {};
     for (const w of workstreams) for (const id of w.sessionIds) sessionWorkstream[id] = w.id;
@@ -877,8 +916,10 @@ export interface Workstream {
 }
 
 export interface WorkstreamEdge {
+  /** For handoff edges, `a` is the session handed off and `b` the one that continued it. */
   a: string;
   b: string;
+  kind: 'files' | 'handoff';
   /** Files both sessions edited, as written in the sessions. */
   files: string[];
 }

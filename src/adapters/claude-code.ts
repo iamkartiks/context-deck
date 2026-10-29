@@ -261,6 +261,10 @@ export const claudeCodeAdapter: Adapter = {
 
   parse,
 
+  // `claude "prompt"` starts an interactive session with an initial prompt.
+  startCommand: () => ({ command: 'claude', args: [] }),
+  defaultContextWindow: 200_000,
+
   resumeCommand(session: SessionRow): ResumeCommand {
     // Subagents can't be resumed on their own; resume the parent conversation.
     const id = session.isSubagent && session.parentId ? session.parentId.split(':').slice(1).join(':') : session.nativeId;

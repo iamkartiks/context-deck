@@ -26,6 +26,15 @@ export interface Adapter {
 
   /** The shell command that resumes this session in the provider's own CLI. */
   resumeCommand(session: SessionRow): ResumeCommand;
+
+  /**
+   * How to start a NEW interactive session with an initial prompt, used for
+   * handoffs. The prompt is appended as the last argument. Omit if the tool
+   * can't take an initial prompt; it then can't be a handoff target.
+   */
+  startCommand?(): { command: string; args: string[] };
+  /** Context window to assume for a new session, for "how much of the window will the brief use". */
+  defaultContextWindow?: number;
 }
 
 export interface ResumeCommand {
