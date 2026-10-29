@@ -4,6 +4,19 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added
+
+- `npm run eval:meaning` is harder and more useful:
+  - every topic has two look-alike sessions, so it measures ranking, not just recall;
+  - there are questions no session answers, which should get nothing added by meaning;
+  - it tries every cutoff and suggests the best one for your model, showing the trade-off;
+  - `--verbose` shows each question's scores, and `--json` gives the full results.
+- `contextdeck semantic enable --min-score <0-1|auto>` sets the cutoff. `semantic` and `doctor` show it.
+
+### Fixed
+
+- `npm run eval:meaning` explains how to start Ollama and get the model instead of printing a stack trace.
+
 ## [0.8.0] - 2026-10-29
 
 Search by meaning, with a model on your own computer. Optional, and off until you turn it on.

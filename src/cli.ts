@@ -67,6 +67,8 @@ ${c.bold('Search by meaning')} (contextdeck semantic enable …)
       --url <address>     Where the model server listens (default http://127.0.0.1:11434)
       --dims <n>          Keep the first n numbers of each vector (default 512; 0 keeps all)
       --allow-remote      Allow a server on another computer. Session text is sent to it.
+      --min-score <0-1>   Lowest score a match by meaning needs ("auto" = the model's default).
+                          npm run eval:meaning suggests one for your model
       --drop              With disable: also delete stored vectors
       --words             With search: words only, skip meaning
 
@@ -121,6 +123,7 @@ const OPTIONS = {
   'allow-remote': { type: 'boolean' },
   drop: { type: 'boolean' },
   words: { type: 'boolean' },
+  'min-score': { type: 'string' },
 } as const;
 
 type Values = ReturnType<typeof parseArgs<{ options: typeof OPTIONS; allowPositionals: true }>>['values'];
@@ -227,7 +230,7 @@ function progressText(p: Progress): string {
 
 function meaningSummary(st: MeaningStatus): string {
   if (!st.enabled) return `${c.bold('Search by meaning: off.')} Turn it on once you have a local embedding model:\n  ollama pull ${DEFAULT_MODEL}\n  contextdeck semantic enable`;
-  const where = `${st.model} ${c.dim(`via ${st.api === 'ollama' ? 'Ollama' : 'OpenAI-compatible API'} at ${st.url}${st.dims ? `, ${st.dims} dims` : ''}`)}`;
+  const where = `${st.model} ${c.dim(`via ${st.api === 'ollama' ? 'Ollama' : 'OpenAI-compatible API'} at ${st.url}${st.dims ? `, ${st.dims} dims` : ''}, cutoff ${st.minScore}`)}`;
   const lines = [`${c.bold('Search by meaning: on.')} ${where}`, `  ${plural(st.pieces, 'piece')} from ${plural(st.sessions, 'session')} ${c.dim(`(${bytes(st.bytes)} of vectors)`)}`];
   if (st.error) lines.push(c.yellow(`  Last problem: ${st.error}`));
   return lines.join('\n');
@@ -261,6 +264,14 @@ async function cmdSemantic(cfg: Config, store: Store, v: Values, args: string[])
     input.dims = n;
   }
   if (v['allow-remote']) input.allowRemote = true;
+  if (v['min-score'] !== undefined) {
+    if (v['min-score'] === 'auto') input.minScore = null;
+    else {
+      const n = Number(v['min-score']);
+      if (!Number.isFinite(n) || n < 0 || n > 1) throw new UsageError('--min-score must be a number from 0 to 1, or "auto"');
+      input.minScore = n;
+    }
+  }
 
   if (!v.json) process.stderr.write(c.dim('Checking the model answers…\n'));
   // The CLI catches up in the foreground instead, below, so progress can be shown

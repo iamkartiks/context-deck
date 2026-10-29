@@ -1,5 +1,5 @@
 import { checkAllowed, createEmbedder, EmbedError, type Embedder } from './embedder.js';
-import { catchUp, combine, searchByMeaning, type CombinedHit, type Progress } from './semantic.js';
+import { catchUp, combine, defaultMinScore, searchByMeaning, type CombinedHit, type Progress } from './semantic.js';
 import { DEFAULT_URLS, loadSettings, saveSettings, type SemanticSettings } from './settings.js';
 import type { SearchHit, Store } from './store.js';
 
@@ -18,6 +18,8 @@ export interface MeaningStatus {
   url: string;
   model: string;
   dims: number;
+  /** The lowest score a match by meaning needs (yours, or the model's default). */
+  minScore: number;
   /** Pieces and sessions with vectors for the current model. */
   pieces: number;
   sessions: number;
@@ -64,6 +66,7 @@ export class MeaningService {
       url: s.url,
       model: s.model,
       dims: s.dims,
+      minScore: s.minScore ?? defaultMinScore(s.model),
       ...stats,
       progress: this.running ? this.progress : null,
       error: this.error,
@@ -199,7 +202,8 @@ export class MeaningService {
         this.error = null;
         this.emit(true);
       }
-      return { hits: combine(this.store, words, meaning, limit), usedMeaning: true, error: null };
+      const minScore = this.settings.minScore ?? defaultMinScore(this.settings.model);
+      return { hits: combine(this.store, words, meaning, limit, { minScore }), usedMeaning: true, error: null };
     } catch (err) {
       this.error = (err as Error).message;
       this.emit(true);

@@ -192,7 +192,13 @@ Or click the **≈** button next to the search box in the canvas. ContextDeck ch
 | **Size** | About 0.5 KB per piece of text with the default 512 numbers per vector (`--dims` changes it), kept in the index file. |
 | **Turning it off** | `contextdeck semantic disable` (add `--drop` to delete the vectors), or **Turn off** in the canvas. |
 
-**How well does it work with your model?** `npm run eval:meaning` builds a small set of made-up sessions and asks questions that share few or no words with the answer, in English, Hindi and Hinglish, then reports how often the right session comes first. Try other models with `-- --model bge-m3`. With a tiny English-only test model it found the right session first for 7 of 10 English questions where word search found none; mixed-language questions need a multilingual model like the default.
+**How well does it work with your model, and what cutoff suits it?** Run `npm run eval:meaning`. It builds made-up sessions (ten topics, each with two look-alike sessions on a similar subject) and asks two kinds of question, in English, Hindi and Hinglish:
+- questions that share few or no words with the right session: does it come first, ahead of the look-alikes?
+- questions no session answers: search by meaning should add nothing.
+
+The **cutoff** is the lowest score a match by meaning needs. It trades those two off, and each model scores on its own scale. The script tries every cutoff and suggests the best one for your model; apply it with `contextdeck semantic enable --min-score <n>` (`auto` goes back to the default). Try other models with `-- --model bge-m3`, and `-- --json` gives the full results to share.
+
+With `qwen3-embedding:0.6b`, the first version of this test (no look-alikes) found the right session first for all 30 questions, in all three languages, where word search found none.
 
 The model server must be on this computer. Pointing ContextDeck at one elsewhere sends your session text there, so it's refused unless you add `--allow-remote` on the command line; the canvas never allows it.
 

@@ -155,6 +155,24 @@ const MEANING_LIMIT = 12;
 const MEANING_MARGIN = 0.12;
 const MIN_SCORE = 0.1;
 
+/**
+ * The lowest score a match by meaning needs, when the person hasn't set one.
+ * Measured per model family with scripts/eval-meaning.mjs; others get the
+ * generic floor.
+ */
+export function defaultMinScore(_model: string): number {
+  return MIN_SCORE;
+}
+
+export interface CombineOptions {
+  /** Matches by meaning below this score are ignored. */
+  minScore?: number;
+  /** …and so are those more than this far below the best one. */
+  margin?: number;
+  /** At most this many sessions are added by meaning alone. */
+  maxAdded?: number;
+}
+
 /** Vectors held in memory between searches; reloaded when the stored set changes. */
 class VectorCache {
   private stamp = '';
@@ -247,11 +265,13 @@ export interface CombinedHit extends SearchHit {
  * contributes 1/(60 + rank), so a session ranked high by either one comes out
  * near the top, and one ranked high by both comes out on top.
  */
-export function combine(store: Store, words: SearchHit[], meaning: MeaningHit[], limit: number): CombinedHit[] {
+export function combine(store: Store, words: SearchHit[], meaning: MeaningHit[], limit: number, opts: CombineOptions = {}): CombinedHit[] {
   const K = 60;
+  const minScore = opts.minScore ?? MIN_SCORE;
+  const margin = opts.margin ?? MEANING_MARGIN;
   const top = meaning[0]?.score ?? 0;
-  const relevant = meaning.filter((m) => m.score >= MIN_SCORE && m.score >= top - MEANING_MARGIN);
-  const closeEnough = new Set(relevant.slice(0, MEANING_LIMIT).map((m) => m.sessionId));
+  const relevant = meaning.filter((m) => m.score >= minScore && m.score >= top - margin);
+  const closeEnough = new Set(relevant.slice(0, opts.maxAdded ?? MEANING_LIMIT).map((m) => m.sessionId));
   const byId = new Map(words.map((h) => [h.session.id, h]));
   const scores = new Map<string, number>();
   words.forEach((h, i) => scores.set(h.session.id, 1 / (K + i + 1)));
@@ -259,7 +279,7 @@ export function combine(store: Store, words: SearchHit[], meaning: MeaningHit[],
   const boosted = new Set<string>();
   meaning.forEach((m, i) => {
     if (!byId.has(m.sessionId) && !closeEnough.has(m.sessionId)) return;
-    if (m.score < MIN_SCORE) return;
+    if (m.score < minScore) return;
     scores.set(m.sessionId, (scores.get(m.sessionId) ?? 0) + 1 / (K + i + 1));
     boosted.add(m.sessionId);
   });
