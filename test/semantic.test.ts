@@ -41,6 +41,9 @@ describe('settings', () => {
     assert.equal(s.semantic.allowRemote, false);
     assert.equal(sanitizeSettings({ semantic: { model: 'a b; rm -rf' } }).semantic.model, 'qwen3-embedding:0.6b');
     assert.equal(sanitizeSettings({ semantic: { url: 'http://user:pw@127.0.0.1:1' } }).semantic.url, 'http://127.0.0.1:11434', 'no credentials in URLs');
+    assert.equal(defaultSettings().semantic.minScore, null, 'the model default unless you set one');
+    assert.equal(sanitizeSettings({ semantic: { minScore: 0.42 } }).semantic.minScore, 0.42);
+    assert.equal(sanitizeSettings({ semantic: { minScore: 3 } }).semantic.minScore, null);
   });
 
   it('saves owner-only', () => {
@@ -175,6 +178,16 @@ describe('search by meaning', () => {
     assert.ok(hits.length <= 12, 'meaning alone adds only the closest few');
   });
 
+  it('adds nothing by meaning when the best match is below the cutoff', async () => {
+    const embedder = createEmbedder(settings);
+    const q = 'which chat decided on the database';
+    const meaning = await searchByMeaning(store, embedder, q, { home: cfg.home });
+    const best = meaning[0]!.score;
+    assert.equal(combine(store, [], meaning, 20, { minScore: best - 0.01 })[0]?.via, 'meaning');
+    assert.deepEqual(combine(store, [], meaning, 20, { minScore: best + 0.01 }), [], 'nothing close enough');
+    assert.equal(combine(store, [], meaning, 20, { minScore: 0, margin: 1, maxAdded: 3 }).length, 3, 'never more than maxAdded');
+  });
+
   it('keeps word matches first and labels what meaning added', async () => {
     const embedder = createEmbedder(settings);
     const words = store.search('cookie');
@@ -296,6 +309,15 @@ describe('search by meaning from the command line', () => {
     assert.equal(json[0].via, 'meaning');
     assert.match((await run('search', 'which chat decided on the database', '--words')).out, /No messages match/);
     assert.match((await run('doctor')).out, /✓ Search by meaning: qwen3-embedding:0\.6b/);
+  });
+
+  it('lets you set the cutoff, or go back to the model default', async () => {
+    assert.equal((await run('semantic', 'enable', '--url', server.url, '--min-score', '0.33')).code, 0);
+    assert.equal(JSON.parse((await run('semantic', '--json')).out).minScore, 0.33);
+    assert.match((await run('semantic')).out, /cutoff 0\.33/);
+    assert.equal((await run('semantic', 'enable', '--url', server.url, '--min-score', 'auto')).code, 0);
+    assert.equal(JSON.parse((await run('semantic', '--json')).out).minScore, 0.1);
+    assert.equal((await run('semantic', 'enable', '--min-score', '7')).code, 2);
   });
 
   it('keeps up as you index, and falls back to words when the model is away', async () => {

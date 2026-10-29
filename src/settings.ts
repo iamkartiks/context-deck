@@ -20,6 +20,8 @@ export interface SemanticSettings {
   dims: number;
   /** Allow a server that isn't on this computer. Session text is then sent to it. */
   allowRemote: boolean;
+  /** Lowest score a match by meaning needs (0–1). null uses the model's default. */
+  minScore: number | null;
 }
 
 export interface Settings {
@@ -36,7 +38,7 @@ export const DEFAULT_URLS: Record<EmbeddingApi, string> = {
 export function defaultSettings(): Settings {
   return {
     version: 1,
-    semantic: { enabled: false, api: 'ollama', url: DEFAULT_URLS.ollama, model: DEFAULT_MODEL, dims: 512, allowRemote: false },
+    semantic: { enabled: false, api: 'ollama', url: DEFAULT_URLS.ollama, model: DEFAULT_MODEL, dims: 512, allowRemote: false, minScore: null },
   };
 }
 
@@ -57,6 +59,7 @@ export function sanitizeSettings(input: unknown): Settings {
   if (typeof s.model === 'string' && /^[\w.:/@+-]{1,200}$/.test(s.model)) sem.model = s.model;
   if (typeof s.dims === 'number' && Number.isInteger(s.dims) && s.dims >= 0 && s.dims <= 8192) sem.dims = s.dims;
   if (typeof s.allowRemote === 'boolean') sem.allowRemote = s.allowRemote;
+  if (typeof s.minScore === 'number' && Number.isFinite(s.minScore) && s.minScore >= 0 && s.minScore <= 1) sem.minScore = s.minScore;
   return out;
 }
 
