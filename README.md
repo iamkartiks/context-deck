@@ -34,7 +34,7 @@ $ contextdeck resume cx:d5e6f701 --run     # reopens it in Codex, in the right f
 Requires **Node.js 22.13 or newer** (22.15+ to read compressed Codex sessions).
 
 ```bash
-git clone <your-fork-url> contextdeck
+git clone https://github.com/iamkartiks/context-deck.git contextdeck
 cd contextdeck
 npm install
 npm run build
