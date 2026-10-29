@@ -69,7 +69,7 @@ describe('cli', () => {
     assert.match(printed.out, /ContextDeck handoff hf_[0-9a-f]{10} from claude-code:/);
 
     const saved = JSON.parse(run('handoff', 'cc:0f3a1b11', '--json').out);
-    assert.match(saved.command, /^codex "\$\(cat .*\.md\)"$/, 'defaults to the other tool');
+    assert.match(saved.command, /^codex "\$\(cat '?.*\.md'?\)"$/, 'defaults to the other tool');
     assert.equal(JSON.parse(run('handoff', 'cx:d5e6f701', '--json').out).command.startsWith('claude '), true);
     assert.equal(JSON.parse(run('handoff', 'cc:0f3a1b11', '--to', 'cc', '--json').out).command.startsWith('claude '), true);
     assert.equal(run('handoff', 'cc:0f3a1b11', '--to', 'gemini').code, 2);

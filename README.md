@@ -115,7 +115,7 @@ Sometimes the next step belongs in a different tool, or the current window is to
 
 1. **Brief.** ContextDeck writes it from what's already indexed: the goal, your later instructions, the previous session's last replies, the files it changed and the commands it ran, plus instructions to check `git status` first and not redo finished work. By default the new agent summarises where things stand and waits for your go-ahead; turn that off to let it carry on. The brief is a few hundred to a few thousand tokens, at most about 6k.
 2. **Review.** You see the whole brief, can edit anything, and see how much of the new window it uses. Nothing has left your computer yet.
-3. **Start.** **Open in Terminal** (macOS) or **Copy command** runs, for example, `cd ~/code/shop && codex "$(cat ~/.contextdeck/handoffs/hf_….md)"`. Briefs are kept in `~/.contextdeck/handoffs/`, readable only by you.
+3. **Start.** **Open in Terminal** (macOS) or **Copy command** runs, for example, `cd ~/code/shop && codex "$(cat ~/.contextdeck/handoffs/hf_….md)"`. Briefs are kept in `~/.contextdeck/handoffs/`, readable only by you. (The copied command is for macOS and Linux shells; on Windows, use `contextdeck handoff <id> --run`, which starts the tool directly.)
 4. **Link.** The brief carries a line like `(ContextDeck handoff hf_1a2b3c4d5e from claude-code:…)`. When the new session is indexed, ContextDeck reads it and links the two sessions. Because the link lives in the transcript, it survives rebuilding the index.
 
 **Privacy:** starting a handoff to a different tool sends the brief to that tool's company (OpenAI for Codex, Anthropic for Claude Code), the same as typing it yourself. The brief is built from redacted text, but read it before you start.

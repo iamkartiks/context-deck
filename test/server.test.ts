@@ -238,7 +238,8 @@ describe('ui server', () => {
     const saved = readFileSync(d.path, 'utf8');
     assert.match(saved, /^# Continue: edited by me\n/);
     assert.match(saved, /ContextDeck handoff hf_00000000aa from claude-code:7c1e2a90/, 'marker added back');
-    assert.equal(d.command, `codex "$(cat ${d.path})"`);
+    // The path is quoted when it needs to be (spaces, Windows backslashes)
+    assert.ok(d.command === `codex "$(cat ${d.path})"` || d.command === `codex "$(cat '${d.path}')"`, d.command);
   });
 
   it('opens Terminal with the handoff command on macOS', async () => {
@@ -251,7 +252,7 @@ describe('ui server', () => {
     assert.equal(r.status, 200, r.body);
     assert.equal(r.json().launched, true);
     assert.equal(launched.length, 1);
-    assert.match(launched[0]!, /^codex "\$\(cat .*hf_00000000bb\.md\)"$/);
+    assert.match(launched[0]!, /^codex "\$\(cat '?.*hf_00000000bb\.md'?\)"$/);
     launched.length = 0;
   });
 
@@ -265,6 +266,7 @@ describe('ui server', () => {
   });
 
   it('opens Terminal with the exact resume command (macOS)', async () => {
+    launched.length = 0;
     const r = await call(server.port, '/api/open-terminal', { method: 'POST', headers: auth(), body: { id: 'cx:d5e6f701' } });
     assert.equal(r.status, 200);
     assert.deepEqual(launched, ['cd /Users/alice/code/acme-shop && codex resume 019a2f3c-5d6e-7f80-91a2-b3c4d5e6f701']);

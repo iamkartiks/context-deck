@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { codexAdapter } from '../src/adapters/codex.js';
@@ -205,7 +205,8 @@ describe('handoff', () => {
       const got = JSON.parse(readFileSync(record, 'utf8'));
       assert.equal(got.args.length, 1);
       assert.equal(got.args[0], nasty.replace(/\n$/, ''), 'exact text (the shell only drops the final newline)');
-      assert.equal(got.cwd, project);
+      // Compare real paths: on macOS the temp folder is reached through a symlink
+      assert.equal(realpathSync(got.cwd), realpathSync(project));
       assert.throws(() => statSync(join(s.dir, 'pwned')));
       assert.throws(() => statSync(join(s.dir, 'pwned2')));
     },
