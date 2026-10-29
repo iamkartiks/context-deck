@@ -40,6 +40,7 @@ src/
   util/                streaming JSONL reader, redaction, text helpers
 ui/                    the canvas: index.html, style.css, app.js, bundled font (no build step)
 scripts/demo-data.mjs  generates realistic sample sessions for UI work
+scripts/make-fixtures.mjs  regenerates fixtures/ (npm run fixtures)
 test/                  *.test.ts, one per module
 fixtures/              synthetic session files that mirror each tool's real layout
 docs/                  architecture, adapter guide, roadmap, README images
@@ -60,7 +61,7 @@ Run `npm run demo:ui` and edit files in `ui/`. The server reads them on every re
 
 ## Format changes (the most common bug)
 
-Claude Code and Codex change their on-disk formats without notice. When something breaks:
+Claude Code, Codex and Qwen Code change their on-disk formats without notice. When something breaks:
 
 1. Run `contextdeck doctor` to find the failing file.
 2. Find the line shape that's new or changed.

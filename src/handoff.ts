@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ADAPTERS, getAdapter, type Adapter } from './adapters/index.js';
 import { ensureMarker, handoffMarker, HANDOFF_ID_RE, newHandoffId, parseHandoffMarker } from './handoff-marker.js';
+import { posixQuote, windowsSafeText, type Launch } from './platform.js';
 import type { ProviderId, SessionRow } from './schema.js';
 import type { StoredMessage, Store } from './store.js';
 
@@ -15,8 +16,11 @@ import type { StoredMessage, Store } from './store.js';
  *      nothing leaves the machine at this point.
  *   2. The person reviews or edits it.
  *   3. saveBrief() stores it under ~/.contextdeck/handoffs/ (owner-only), and
- *      startLine() builds `cd <project> && codex "$(cat <brief>)"`, which starts
- *      the target tool with the brief as its first message.
+ *      startLaunch() describes how to start the target tool with the brief as
+ *      its first message: `cd <project> && codex "$(cat <brief>)"` on macOS
+ *      and Linux. On Windows a long multi-line argument can't pass safely
+ *      through cmd.exe, so the first message is a one-line pointer to the
+ *      brief file instead (see pointerPrompt()).
  *   4. The brief carries a marker line. When the new session is indexed, the
  *      store reads the marker and links the two sessions.
  */
@@ -28,6 +32,8 @@ export interface BriefOptions {
   checkIn?: boolean;
   /** Reuse an id (e.g. when rebuilding a preview); a new one is made otherwise. */
   handoffId?: string;
+  /** ContextDeck's folder, to read an earlier brief when a session started from a pointer prompt. */
+  home?: string;
 }
 
 export interface Brief {
@@ -77,6 +83,22 @@ function goalFromPreviousBrief(text: string): string | null {
   return m ? m[1]!.trim() : null;
 }
 
+const POINTER_RE = /^Continue: .*Read the handoff brief in .+ and follow it\./;
+
+function isPointer(text: string): boolean {
+  return POINTER_RE.test(text.trim());
+}
+
+/** A brief saved by an earlier handoff, looked up by id in ContextDeck's own folder only. */
+function readSavedBrief(home: string, handoffId: string): string | null {
+  if (!HANDOFF_ID_RE.test(handoffId)) return null;
+  try {
+    return readFileSync(join(home, 'handoffs', `${handoffId}.md`), 'utf8');
+  } catch {
+    return null;
+  }
+}
+
 function isCommand(text: string): boolean {
   return /^\/[a-z][\w:-]*(\s|$)/i.test(text.trim());
 }
@@ -124,14 +146,15 @@ export function buildBrief(store: Store, ref: string, opts: BriefOptions): Brief
   const replies = messages.filter((m) => m.role === 'assistant');
   // Tool calls (not their results), leaving out pure reads and searches, which are noise here
   const calls = messages.filter(
-    (m) => m.role === 'tool' && !/^[\w.-]+ result:/.test(m.text) && !/^(Read|Grep|Glob|LS|WebFetch|WebSearch|TodoWrite):/.test(m.text),
+    (m) => m.role === 'tool' && !/^[\w.-]+ result:/.test(m.text) && !/^(Read|Grep|Glob|LS|WebFetch|WebSearch|TodoWrite|read_file|read_many_files|grep_search|glob|list_directory|web_fetch|web_search|todo_write):/.test(m.text),
   );
   const files = store.filesTouched(from.id);
 
   // The goal: the first prompt, or the original goal if this session was itself a handoff
   const first = users[0];
   const earlier = first ? parseHandoffMarker(first.text) : null;
-  const goal = first ? (earlier ? goalFromPreviousBrief(first.text) ?? first.text : first.text) : from.title;
+  const earlierText = first && earlier ? (isPointer(first.text) && opts.home ? readSavedBrief(opts.home, earlier.id) : null) ?? first.text : null;
+  const goal = first ? (earlierText ? goalFromPreviousBrief(earlierText) ?? first.text : first.text) : from.title;
 
   const build = (instructionCount: number, replyCount: number, commandCount: number): string => {
     const later = users.slice(1);
@@ -221,21 +244,38 @@ export function finalizeBrief(text: string, handoffId: string, fromSessionId: st
   return ensureMarker(text, handoffId, fromSessionId);
 }
 
-function shellQuote(s: string): string {
-  return /^[A-Za-z0-9_./:@%+=-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+/**
+ * The one-line first message used on Windows: it names the brief file and
+ * carries the marker, so the new session is still linked. Only characters
+ * that are safe on a Windows command line are used.
+ */
+export function pointerPrompt(title: string, briefPath: string, handoffId: string, fromSessionId: string): string {
+  const t = windowsSafeText(title) || 'the previous session';
+  return `Continue: ${t}. Read the handoff brief in ${briefPath} and follow it. ${handoffMarker(handoffId, fromSessionId)}`;
 }
 
 /**
- * The shell line that starts the target tool in the project folder with the
- * brief as its first message. The brief is read from its file with `$(cat …)`
- * inside double quotes, so its contents are passed as one argument and never
- * interpreted by the shell.
+ * How to start the target tool in the project folder with the brief as its
+ * first message.
+ *
+ * macOS and Linux: the brief is read from its file with `"$(cat …)"`, so its
+ * contents are passed as one argument and never interpreted by the shell.
+ * Windows: the first message is pointerPrompt().
  */
-export function startLine(target: Adapter, cwd: string | null, briefPath: string): string {
+export function startLaunch(
+  target: Adapter,
+  from: SessionRow,
+  briefPath: string,
+  handoffId: string,
+  platform: NodeJS.Platform = process.platform,
+): Launch {
   const start = target.startCommand?.();
   if (!start) throw new Error(`${target.label} can't be started with a prompt.`);
-  const run = `${[start.command, ...start.args].map(shellQuote).join(' ')} "$(cat ${shellQuote(briefPath)})"`;
-  return cwd && existsSync(cwd) ? `cd ${shellQuote(cwd)} && ${run}` : run;
+  const cwd = from.cwd && existsSync(from.cwd) ? from.cwd : null;
+  if (platform === 'win32') {
+    return { cwd, command: start.command, args: [...start.args, pointerPrompt(from.title, briefPath, handoffId, from.id)] };
+  }
+  return { cwd, command: start.command, args: start.args, posixTail: `"$(cat ${posixQuote(briefPath)})"` };
 }
 
 /** Tools that can receive a handoff. */

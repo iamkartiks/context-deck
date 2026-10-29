@@ -54,6 +54,47 @@ describe('Codex adapter', () => {
     assert.deepEqual(s!.compactionPoints, [1]);
   });
 
+  it('counts one compaction once, even when the older format records it twice', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cx-'));
+    try {
+      const p = join(dir, 'rollout-2026-01-01T00-00-00-11111111-2222-4333-8444-555555555556.jsonl');
+      const ev = (ts: string, type: string, payload: unknown) => JSON.stringify({ timestamp: ts, type, payload });
+      const tokens = (n: number) => ({ type: 'token_count', info: { last_token_usage: { input_tokens: n, output_tokens: 0 }, model_context_window: 272000 } });
+      writeFileSync(
+        p,
+        [
+          ev('2026-01-01T00:00:00Z', 'session_meta', { id: '11111111-2222-4333-8444-555555555556' }),
+          ev('2026-01-01T00:00:01Z', 'response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }),
+          ev('2026-01-01T00:00:02Z', 'event_msg', tokens(200_000)),
+          // One compaction, legacy style: a `compacted` record and a `context_compacted` event
+          ev('2026-01-01T00:00:03Z', 'compacted', { message: 'summary' }),
+          ev('2026-01-01T00:00:03Z', 'event_msg', { type: 'context_compacted' }),
+          ev('2026-01-01T00:00:04Z', 'event_msg', tokens(30_000)),
+          // A second compaction
+          ev('2026-01-01T00:00:05Z', 'compacted', { message: 'summary' }),
+          ev('2026-01-01T00:00:05Z', 'event_msg', { type: 'context_compacted' }),
+          ev('2026-01-01T00:00:06Z', 'event_msg', tokens(20_000)),
+        ].join('\n'),
+      );
+      const { session: s } = await codexAdapter.parse(p);
+      assert.equal(s!.compactions, 2);
+      assert.deepEqual(s!.compactionPoints, [1, 2]);
+
+      // A file with only the events still counts them
+      writeFileSync(
+        p,
+        [
+          ev('2026-01-01T00:00:00Z', 'session_meta', { id: '11111111-2222-4333-8444-555555555556' }),
+          ev('2026-01-01T00:00:01Z', 'response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }),
+          ev('2026-01-01T00:00:02Z', 'event_msg', { type: 'context_compacted' }),
+        ].join('\n'),
+      );
+      assert.equal((await codexAdapter.parse(p)).session!.compactions, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('extracts files from apply_patch calls and shell commands', async () => {
     const { session: s } = await codexAdapter.parse(CX_MODERN);
     assert.equal(s!.toolCalls, 2);

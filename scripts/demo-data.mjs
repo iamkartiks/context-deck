@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Writes a realistic, entirely synthetic set of Claude Code and Codex sessions
- * (about 20 sessions across 5 projects) for developing and demoing the UI.
+ * Writes a realistic, entirely synthetic set of Claude Code, Codex and Qwen Code
+ * sessions (about 25 across 5 projects) for developing and demoing the UI.
  *
  *   node scripts/demo-data.mjs [outDir]      (default .demo-data)
  *
@@ -187,6 +187,52 @@ function codex({ cwd, branch, hoursAgo, minutes = 20, prompt, reply, finalText, 
   write(`codex/sessions/${day}/rollout-${stamp}-${id}.jsonl`, lines);
 }
 
+function qwen({ cwd, branch, hoursAgo, minutes = 20, prompt, reply, finalText, followUp, files = [], ctx, compactions = 0, model = 'qwen3-coder:30b', window = 262_144, subagent }) {
+  const id = uuid(hoursAgo * 23);
+  const start = hoursAgo * H;
+  const { points, marks } = curve(ctx, compactions, window, hoursAgo + 0.7);
+  const step = (minutes * 60_000) / (points.length * 3 + 6);
+  let t = start;
+  let parent = null;
+  let n = 0;
+  const rec = (type, fields) => {
+    const r = { uuid: `${id}-${n++}`, parentUuid: parent, sessionId: id, timestamp: iso((t -= step)), type, cwd, version: '0.26.3', gitBranch: branch, ...fields };
+    parent = r.uuid;
+    return r;
+  };
+  const usage = (ctxNow) => ({ promptTokenCount: ctxNow - 900, candidatesTokenCount: 900, totalTokenCount: ctxNow });
+  const lines = [rec('user', { message: { role: 'user', parts: [{ text: prompt }] }, systemPayload: { displayText: prompt, hookContext: '' } })];
+  points.forEach((ctxNow, i) => {
+    if (marks.includes(i)) lines.push(rec('system', { subtype: 'chat_compression', systemPayload: { info: { originalTokenCount: ctxNow * 3, newTokenCount: ctxNow }, compressedHistory: [] } }));
+    const lastTurn = i === points.length - 1;
+    const parts = [];
+    if (i === 0) parts.push({ text: reply });
+    if (lastTurn) parts.push({ text: finalText });
+    let result = null;
+    if (i === 1 && files.length) {
+      files.forEach((f, k) => parts.push({ functionCall: { id: `w${k}`, name: k === 0 ? 'edit' : 'write_file', args: { file_path: `${cwd}/${f}` } } }));
+    } else if (!lastTurn && i > 0) {
+      const cmd = ['npm test', 'git status --short', 'rg -n "TODO" .'][i % 3];
+      parts.push({ functionCall: { id: `s${i}`, name: 'run_shell_command', args: { command: cmd } } });
+      result = { functionResponse: { id: `s${i}`, name: 'run_shell_command', response: { output: '(output)' } } };
+    }
+    lines.push(rec('assistant', { model, message: { role: 'model', parts }, usageMetadata: usage(ctxNow), contextWindowSize: window }));
+    if (result) lines.push(rec('tool_result', { message: { role: 'user', parts: [result] } }));
+    if (followUp && i === Math.floor(points.length / 2)) lines.push(rec('user', { message: { role: 'user', parts: [{ text: followUp }] } }));
+  });
+  const project = cwd.replace(/[^a-zA-Z0-9]/g, '-');
+  write(`qwen/projects/${project}/chats/${id}.jsonl`, lines);
+  if (subagent) {
+    parent = null;
+    const agentId = 'explore-' + id.slice(0, 4);
+    const sub = [
+      rec('user', { isSidechain: true, agentId, message: { role: 'user', parts: [{ text: subagent.prompt }] } }),
+      rec('assistant', { isSidechain: true, agentId, model, message: { role: 'model', parts: [{ text: subagent.reply }] }, usageMetadata: usage(12_000) }),
+    ];
+    write(`qwen/projects/${project}/subagents/${id}/agent-${agentId}.jsonl`, sub);
+  }
+}
+
 // ── acme-shop ────────────────────────────────────────────────────────────
 const shop = `${HOME}/acme-shop`;
 claude({ cwd: shop, branch: 'feature/session-cookies', hoursAgo: 52, minutes: 70, ctx: 142_000, compactions: 1,
@@ -311,5 +357,24 @@ codex({ cwd: data, branch: 'main', hoursAgo: 0.2, minutes: 8, ctx: 14_000,
   reply: 'Writing it against the events table, grouping by event date.',
   finalText: 'Added queries/late_events.sql.',
   files: ['queries/late_events.sql'] });
+
+// ── Qwen Code: a local Qwen model and DeepSeek ───────────────────────────
+qwen({ cwd: shop, branch: 'feature/rate-limit', hoursAgo: 6, minutes: 35, ctx: 88_000, compactions: 1,
+  prompt: 'Add rate limiting to the login endpoint: at most 5 attempts per minute per IP, and return Retry-After.',
+  reply: "I'll put a small sliding-window limiter in front of the login handler.",
+  followUp: 'Make the limit configurable through an environment variable.',
+  finalText: 'Login is limited to LOGIN_RATE_LIMIT attempts per minute per IP (default 5). 429 responses include Retry-After.',
+  files: ['src/auth/session.ts', 'src/auth/rate-limit.ts'],
+  subagent: { prompt: 'Find every place that reads the auth cookie.', reply: 'Two places: src/auth/session.ts and src/auth/refresh.ts.' } });
+qwen({ cwd: data, branch: 'main', hoursAgo: 30, ctx: 41_000, model: 'deepseek-chat', window: 131_072,
+  prompt: 'Explain why the late-events test is flaky and fix it.',
+  reply: 'The test builds timestamps from the wall clock; around midnight the bucket changes.',
+  finalText: 'The test now uses a fixed clock. Ran it 200 times without a failure.',
+  files: ['tests/test_dedupe.py'] });
+qwen({ cwd: notes, branch: 'feature/offline-sync', hoursAgo: 3, minutes: 12, ctx: 22_000,
+  prompt: 'Write a migration guide for the new offline sync format.',
+  reply: 'I will base it on the conflict rules in sync/merge.ts.',
+  finalText: 'docs/offline-sync.md covers the new format, conflict rules and how to roll back.',
+  files: ['docs/offline-sync.md'] });
 
 console.log(`Demo sessions written to ${out}`);

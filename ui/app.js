@@ -1174,6 +1174,8 @@ function renderReader() {
 // ── Handoff composer ─────────────────────────────────────────────────────
 
 const COMPANY = { 'claude-code': 'Anthropic', codex: 'OpenAI' };
+// Where a brief goes for tools that can run any model
+const MODEL_DEPENDENT = new Set(['qwen-code']);
 // Step 3 of the brief, in its two forms (must match src/handoff.ts)
 const CHECK_IN_STEP = '3. Then reply with a short summary of where things stand and the next step you propose, and wait for my go-ahead before changing any files.';
 const CARRY_ON_STEP = '3. Then carry on with the next step.';
@@ -1285,9 +1287,11 @@ function renderComposer(text) {
   const cmd = h('code', { class: 'composer-cmd', hidden: true });
 
   const notes = [
-    p.crossProvider
-      ? h('p', { class: 'note' }, `Starting it sends this brief to ${COMPANY[p.to] ?? p.toLabel} (${p.toLabel}). Secrets were removed when the session was indexed, but read it through first.`)
-      : null,
+    p.crossProvider && MODEL_DEPENDENT.has(p.to)
+      ? h('p', { class: 'note' }, `Starting it sends this brief to the model ${p.toLabel} is set up to use. With a local model it stays on this computer; otherwise it goes to that model’s provider. Secrets were removed when the session was indexed, but read it through first.`)
+      : p.crossProvider
+        ? h('p', { class: 'note' }, `Starting it sends this brief to ${COMPANY[p.to] ?? p.toLabel} (${p.toLabel}). Secrets were removed when the session was indexed, but read it through first.`)
+        : null,
     p.cwd && !p.cwdExists
       ? h('p', { class: 'warn' }, `The project folder ${p.cwd} isn’t on this computer any more, so the new session will start in your home folder.`)
       : null,

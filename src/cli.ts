@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { parseArgs } from 'node:util';
@@ -8,7 +7,8 @@ import { ago, bytes, c, contextUsage, indent, providerLabel, table, tokens } fro
 import { indexSources, watchSources, type IndexSummary } from './indexer.js';
 import { openBrowser, startUiServer } from './server.js';
 import { adapterByPrefix } from './adapters/index.js';
-import { buildBrief, saveBrief, startLine } from './handoff.js';
+import { buildBrief, saveBrief, startLaunch } from './handoff.js';
+import { commandText, findTerminal, runHere } from './platform.js';
 import type { SessionRow } from './schema.js';
 import { Store } from './store.js';
 import { zstdSupported } from './util/jsonl.js';
@@ -42,7 +42,7 @@ ${c.bold('Commands')}
   doctor              Check paths, Node features and parse errors
 
 ${c.bold('Common options')}
-  -p, --provider <id>   Only this tool: claude-code (cc) or codex (cx)
+  -p, --provider <id>   Only this tool: claude-code (cc), codex (cx) or qwen-code (qw)
       --project <name>  Only sessions in this project (folder name or full path)
   -n, --limit <n>       How many results (default 30)
       --json            Machine-readable output (stable; this is what the UI will use)
@@ -52,9 +52,11 @@ ${c.bold('Paths')} (flag > env var > default)
       --home <dir>        Index location       CONTEXTDECK_HOME        ~/.contextdeck
       --claude-dir <dir>  Claude Code dir      CONTEXTDECK_CLAUDE_DIR  $CLAUDE_CONFIG_DIR or ~/.claude
       --codex-dir <dir>   Codex dir            CONTEXTDECK_CODEX_DIR   $CODEX_HOME or ~/.codex
+      --qwen-dir <dir>    Qwen Code dir        CONTEXTDECK_QWEN_DIR    $QWEN_RUNTIME_DIR, $QWEN_HOME or ~/.qwen
 
 ${c.bold('Handoff options')}
-  -t, --to <tool>       Tool to continue in: codex (cx) or claude-code (cc). Default: the other tool
+  -t, --to <tool>       Tool to continue in: codex (cx), claude-code (cc) or qwen-code (qw).
+                        Default: Codex, or Claude Code when handing off from Codex
       --print           Only print the brief
       --run             Start the new session right here in this terminal
       --no-check-in     Let the new agent carry on without checking in first
@@ -95,6 +97,7 @@ const OPTIONS = {
   home: { type: 'string' },
   'claude-dir': { type: 'string' },
   'codex-dir': { type: 'string' },
+  'qwen-dir': { type: 'string' },
 } as const;
 
 type Values = ReturnType<typeof parseArgs<{ options: typeof OPTIONS; allowPositionals: true }>>['values'];
@@ -250,7 +253,7 @@ function cmdShow(store: Store, v: Values, args: string[]): void {
         out.push(`${who} ${c.dim(ago(m.ts))}`, indent(text), '');
       }
     }
-    if (resume) out.push(c.bold('Resume'), `  ${resume.display}`);
+    if (resume) out.push(c.bold('Resume'), `  ${commandText({ cwd: resume.cwd, command: resume.command, args: resume.args }, process.platform)}`);
     return out.join('\n').trimEnd();
   });
 }
@@ -263,26 +266,14 @@ async function cmdResume(store: Store, v: Values, args: string[]): Promise<void>
   if (!adapter) throw new Error(`No adapter for provider ${s.provider}`);
   const cmd = adapter.resumeCommand(s);
 
+  const launch = { cwd: cmd.cwd, command: cmd.command, args: cmd.args };
   if (!v.run) {
-    print(!!v.json, cmd, () => cmd.display);
+    const line = commandText(launch, process.platform);
+    print(!!v.json, { ...cmd, display: line }, () => line);
     return;
   }
-  const cwd = cmd.cwd && existsSync(cmd.cwd) ? cmd.cwd : process.cwd();
-  if (cmd.cwd && cwd !== cmd.cwd) process.stderr.write(c.yellow(`Note: ${cmd.cwd} no longer exists; running here.\n`));
-  await new Promise<void>((resolveRun, reject) => {
-    const child = spawn(cmd.command, cmd.args, { cwd, stdio: 'inherit' });
-    child.on('error', (err) =>
-      reject(
-        (err as NodeJS.ErrnoException).code === 'ENOENT'
-          ? new Error(`\`${cmd.command}\` is not installed or not on your PATH.`)
-          : err,
-      ),
-    );
-    child.on('exit', (code) => {
-      process.exitCode = code ?? 0;
-      resolveRun();
-    });
-  });
+  if (cmd.cwd && !existsSync(cmd.cwd)) process.stderr.write(c.yellow(`Note: ${cmd.cwd} no longer exists; running here.\n`));
+  process.exitCode = await runHere(launch);
 }
 
 function cmdRelated(store: Store, v: Values, args: string[]): void {
@@ -366,19 +357,20 @@ async function cmdWatch(cfg: Config, store: Store, v: Values): Promise<void> {
 
 async function cmdHandoff(cfg: Config, store: Store, v: Values, args: string[]): Promise<void> {
   const ref = args[0];
-  if (!ref) throw new UsageError('Usage: contextdeck handoff <id> [--to codex|claude-code] [--print | --run]');
+  if (!ref) throw new UsageError('Usage: contextdeck handoff <id> [--to codex|claude-code|qwen-code] [--print | --run]');
   const from = store.resolve(ref);
   const to = v.to ? adapterByPrefix(v.to)?.id : from.provider === 'codex' ? 'claude-code' : 'codex';
   const target = to ? getAdapter(to) : undefined;
-  if (!to || !target?.startCommand) throw new UsageError(`Unknown tool "${v.to}". Use codex (cx) or claude-code (cc).`);
+  if (!to || !target?.startCommand) throw new UsageError(`Unknown tool "${v.to}". Use codex (cx), claude-code (cc) or qwen-code (qw).`);
 
-  const brief = buildBrief(store, from.id, { to, checkIn: !v['no-check-in'] });
+  const brief = buildBrief(store, from.id, { to, checkIn: !v['no-check-in'], home: cfg.home });
   if (v.print) {
     process.stdout.write(brief.text);
     return;
   }
   const path = saveBrief(cfg.home, brief.handoffId, brief.text);
-  const line = startLine(target, from.cwd, path);
+  const launch = startLaunch(target, from, path, brief.handoffId);
+  const line = commandText(launch, process.platform);
 
   if (!v.run) {
     print(!!v.json, { handoffId: brief.handoffId, path, command: line, tokens: brief.tokens }, () =>
@@ -395,22 +387,14 @@ async function cmdHandoff(cfg: Config, store: Store, v: Values, args: string[]):
     return;
   }
 
-  const start = target.startCommand()!;
-  const cwd = from.cwd && existsSync(from.cwd) ? from.cwd : process.cwd();
-  if (from.cwd && cwd !== from.cwd) process.stderr.write(c.yellow(`Note: ${from.cwd} no longer exists; starting here.\n`));
+  if (from.cwd && !launch.cwd) process.stderr.write(c.yellow(`Note: ${from.cwd} no longer exists; starting here.\n`));
   process.stderr.write(c.dim(`Starting ${target.label} with the brief (${brief.handoffId})…\n`));
-  await new Promise<void>((resolveRun, reject) => {
-    const child = spawn(start.command, [...start.args, brief.text], { cwd, stdio: 'inherit' });
-    child.on('error', (err) =>
-      reject(
-        (err as NodeJS.ErrnoException).code === 'ENOENT' ? new Error(`\`${start.command}\` is not installed or not on your PATH.`) : err,
-      ),
-    );
-    child.on('exit', (code) => {
-      process.exitCode = code ?? 0;
-      resolveRun();
-    });
-  });
+  // macOS and Linux: pass the brief itself as one argument, with no shell involved.
+  // Windows: the one-line pointer prompt from startLaunch().
+  const start = target.startCommand()!;
+  process.exitCode = await runHere(
+    process.platform === 'win32' ? launch : { cwd: launch.cwd, command: start.command, args: [...start.args, brief.text] },
+  );
 }
 
 async function cmdUi(cfg: Config, store: Store, v: Values): Promise<void> {
@@ -457,6 +441,8 @@ function cmdStats(cfg: Config, store: Store, v: Values): void {
   });
 }
 
+const DIR_FLAG: Record<string, string> = { 'claude-code': 'claude', codex: 'codex', 'qwen-code': 'qwen' };
+
 async function cmdDoctor(cfg: Config, store: Store, v: Values): Promise<void> {
   let fts5 = false;
   try {
@@ -479,7 +465,18 @@ async function cmdDoctor(cfg: Config, store: Store, v: Values): Promise<void> {
   );
   const st = store.stats();
   const errors = store.fileErrors();
-  const report = { node: process.version, fts5, zstd: zstdSupported(), dbPath: cfg.dbPath, sources, stats: st, errors };
+  const terminal = findTerminal();
+  const report = {
+    node: process.version,
+    platform: process.platform,
+    fts5,
+    zstd: zstdSupported(),
+    terminal: terminal?.name ?? null,
+    dbPath: cfg.dbPath,
+    sources,
+    stats: st,
+    errors,
+  };
 
   print(!!v.json, report, () => {
     const ok = (b: boolean) => (b ? c.green('✓') : c.red('✗'));
@@ -487,12 +484,15 @@ async function cmdDoctor(cfg: Config, store: Store, v: Values): Promise<void> {
       `${ok(true)} Node ${process.version}`,
       `${ok(fts5)} SQLite full-text search (FTS5)`,
       `${ok(zstdSupported())} zstd support ${c.dim('(compressed Codex sessions; needs Node 22.15+)')}`,
+      `${ok(!!terminal)} Open in Terminal: ${
+        terminal ? terminal.name : c.dim(process.platform === 'linux' ? 'no terminal app or graphical session found; copy commands instead' : 'not available')
+      }`,
       `${ok(true)} Index: ${cfg.dbPath} ${c.dim(`(${bytes(st.dbBytes)}, ${st.sessions} sessions)`)}`,
       '',
       ...sources.map(
         (s) =>
           `${ok(s.exists)} ${s.label.padEnd(12)} ${s.root} ${c.dim(
-            s.exists ? `(${s.files} session files)` : `(not found — set ${s.envVar} or --${s.provider === 'codex' ? 'codex' : 'claude'}-dir)`,
+            s.exists ? `(${s.files} session files)` : `(not found — set ${s.envVar} or --${DIR_FLAG[s.provider] ?? s.provider}-dir)`,
           )}`,
       ),
     ];
@@ -528,7 +528,7 @@ export async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
-  const cfg = loadConfig({ home: v.home, claudeDir: v['claude-dir'], codexDir: v['codex-dir'] });
+  const cfg = loadConfig({ home: v.home, claudeDir: v['claude-dir'], codexDir: v['codex-dir'], qwenDir: v['qwen-dir'] });
   let store: Store | null = null;
   try {
     store = new Store(cfg.dbPath);

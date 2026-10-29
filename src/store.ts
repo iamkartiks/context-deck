@@ -12,7 +12,8 @@ import type { ContextSeries, NormalizedSession, ProviderId, SessionRow } from '.
  * from the providers' own session files, which are never modified.
  */
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
+const PAGE_SIZE = 16384;
 
 /** Longest context series kept per session; longer ones are downsampled. */
 const MAX_SERIES_POINTS = 120;
@@ -33,6 +34,10 @@ export function downsampleSeries(points: number[], compactions: number[], max = 
   const marks = compactions.map((c) => clamp(Math.floor(c / step), max));
   return { points: out, compactions: [...new Set(marks)] };
 }
+
+const FTS_TABLE = `CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+  text, content = 'messages', content_rowid = 'id', tokenize = 'porter unicode61'
+);`;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -91,8 +96,9 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id, seq);
 
--- Full-text index; rowid = messages.id
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(text, tokenize = 'porter unicode61');
+-- Full-text index over messages.text. "External content": the index points at
+-- the messages table instead of keeping a second copy of every message.
+${FTS_TABLE}
 
 CREATE TABLE IF NOT EXISTS session_files (
   session_id  TEXT NOT NULL,
@@ -226,7 +232,13 @@ export class Store {
     this.path = dbPath;
     if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = OFF;');
+    // page_size and auto_vacuum only take effect on a new, empty file (or
+    // after VACUUM), so they come first. 16 KB pages fit several multi-KB
+    // messages each; with 4 KB pages most of each page was left empty.
+    // journal_size_limit stops the write-ahead log staying at its largest size.
+    this.db.exec(
+      `PRAGMA page_size = ${PAGE_SIZE}; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 4194304; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = OFF;`,
+    );
     this.migrate();
   }
 
@@ -240,14 +252,22 @@ export class Store {
       );
     }
     if (current > 0 && current < SCHEMA_VERSION) {
-      // v2 added the context-over-time series, v3 the handoff link. The index
-      // is a cache, so the simplest correct upgrade is to add any missing
-      // columns and re-read every file.
+      // v2 added the context-over-time series, v3 the handoff link, v4 the
+      // smaller search index and incremental vacuum. The index is a cache, so
+      // the simplest correct upgrade is to fix up the tables, empty them, and
+      // re-read every file.
       const cols = new Set((this.db.prepare(`PRAGMA table_info(sessions)`).all() as Row[]).map((c) => String(c.name)));
       for (const col of ['context_series', 'handoff_id', 'handoff_from']) {
         if (!cols.has(col)) this.db.exec(`ALTER TABLE sessions ADD COLUMN ${col} TEXT`);
       }
-      this.db.exec(`DELETE FROM messages_fts; DELETE FROM messages; DELETE FROM session_files; DELETE FROM sessions; DELETE FROM files;`);
+      this.db.exec(`DROP TABLE IF EXISTS messages_fts`);
+      this.db.exec(FTS_TABLE);
+      this.db.exec(`DELETE FROM messages; DELETE FROM session_files; DELETE FROM sessions; DELETE FROM files;`);
+      // Rewrite the file with the new page size and incremental vacuum, handing
+      // the old space back. The page size can't change while in WAL mode.
+      this.db.exec(
+        `PRAGMA journal_mode = DELETE; PRAGMA page_size = ${PAGE_SIZE}; PRAGMA auto_vacuum = INCREMENTAL; VACUUM; PRAGMA journal_mode = WAL;`,
+      );
     }
     // Created after the upgrade above so the column exists on older indexes
     this.db.exec(`CREATE INDEX IF NOT EXISTS sessions_handoff ON sessions(handoff_from)`);
@@ -258,6 +278,23 @@ export class Store {
 
   close(): void {
     this.db.close();
+  }
+
+  /**
+   * Hand unused space back to the disk. Cheap to call: it only does work when
+   * a meaningful share of the file is free (e.g. after sessions were removed).
+   */
+  reclaim(): { freedBytes: number } {
+    const n = (sql: string) => Number(Object.values(this.db.prepare(sql).get() as Row)[0] ?? 0);
+    // Fold the write-ahead log into the main file first, so free pages are counted
+    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    const pageSize = n('PRAGMA page_size');
+    const free = n('PRAGMA freelist_count');
+    const total = n('PRAGMA page_count');
+    if (free < 64 || free < total * 0.1) return { freedBytes: 0 };
+    this.db.exec('PRAGMA incremental_vacuum');
+    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    return { freedBytes: (free - n('PRAGMA freelist_count')) * pageSize };
   }
 
   private tx<T>(fn: () => T): T {
@@ -335,7 +372,11 @@ export class Store {
   }
 
   private deleteSessionData(sessionId: string, includeRow: boolean): void {
-    this.db.prepare(`DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM messages WHERE session_id = ?)`).run(sessionId);
+    // External-content FTS5 needs the old text to remove a row from the index,
+    // so this must run before the messages themselves are deleted.
+    this.db
+      .prepare(`INSERT INTO messages_fts(messages_fts, rowid, text) SELECT 'delete', id, text FROM messages WHERE session_id = ?`)
+      .run(sessionId);
     this.db.prepare(`DELETE FROM messages WHERE session_id = ?`).run(sessionId);
     this.db.prepare(`DELETE FROM session_files WHERE session_id = ?`).run(sessionId);
     if (includeRow) this.db.prepare(`DELETE FROM sessions WHERE id = ?`).run(sessionId);

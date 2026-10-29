@@ -11,7 +11,8 @@ import { indexSources, watchSources, type IndexSummary, type Watcher } from './i
 import type { Store } from './store.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildBrief, finalizeBrief, handoffTargets, saveBrief, startLine } from './handoff.js';
+import { buildBrief, finalizeBrief, handoffTargets, saveBrief, startLaunch } from './handoff.js';
+import { commandText, findTerminal, openInTerminal, type Launch, type TerminalInfo } from './platform.js';
 import { HANDOFF_ID_RE } from './handoff-marker.js';
 
 /**
@@ -61,10 +62,12 @@ export interface UiServerOptions {
   portAttempts?: number;
   /** Watch the session folders and push updates to open pages. Default true. */
   watch?: boolean;
-  /** Override the platform check for "open in terminal" (tests). */
+  /** Override the platform: command style and "open in terminal" (tests). */
   platform?: NodeJS.Platform;
+  /** Override terminal detection; null means none available (tests). */
+  terminal?: TerminalInfo | null;
   /** Replace the terminal launcher (tests). */
-  launchTerminal?: (shellCommand: string) => Promise<void>;
+  launchTerminal?: (launch: Launch) => Promise<void>;
   /** Summary of the index run that happened just before starting, shown in the UI. */
   initialIndex?: IndexSummary;
 }
@@ -85,25 +88,9 @@ class HttpError extends Error {
   }
 }
 
-function shellQuote(s: string): string {
-  return /^[A-Za-z0-9_./:@%+=-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
-}
-
-/** The exact shell line to run (not the truncated display string). */
-export function shellLine(cmd: ResumeCommand): string {
-  const run = [cmd.command, ...cmd.args].map(shellQuote).join(' ');
-  return cmd.cwd ? `cd ${shellQuote(cmd.cwd)} && ${run}` : run;
-}
-
-/** Open Terminal.app on macOS and run one shell line in a new window. */
-export function launchMacTerminal(shellCommand: string): Promise<void> {
-  const escaped = shellCommand.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  const script = `tell application "Terminal"\n  activate\n  do script "${escaped}"\nend tell`;
-  return new Promise((resolve, reject) => {
-    const child = spawn('osascript', ['-e', script], { stdio: 'ignore' });
-    child.on('error', reject);
-    child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`osascript exited with ${code}`))));
-  });
+/** A resume command as a platform-neutral launch. */
+export function resumeLaunch(cmd: ResumeCommand): Launch {
+  return { cwd: cmd.cwd, command: cmd.command, args: cmd.args };
 }
 
 function send(res: ServerResponse, status: number, body: unknown): void {
@@ -141,8 +128,19 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
 export async function startUiServer(store: Store, cfg: Config, opts: UiServerOptions = {}): Promise<UiServer> {
   const token = randomBytes(24).toString('base64url');
   const platform = opts.platform ?? process.platform;
-  const launchTerminal = opts.launchTerminal ?? launchMacTerminal;
-  const canOpenTerminal = platform === 'darwin';
+  const terminal = opts.terminal !== undefined ? opts.terminal : findTerminal(platform);
+  const canOpenTerminal = !!terminal;
+  const noTerminal =
+    platform === 'linux'
+      ? 'No terminal app was found (or there is no graphical session). Copy the command instead.'
+      : 'Opening a terminal is not supported on this system. Copy the command instead.';
+  const launchTerminal = async (l: Launch) => {
+    try {
+      await (opts.launchTerminal ? opts.launchTerminal(l) : openInTerminal(l, platform).then(() => {}));
+    } catch (err) {
+      throw new HttpError(500, `Couldn't open a terminal: ${(err as Error).message}`);
+    }
+  };
   const clients = new Set<ServerResponse>();
   let port = 0;
   let lastIndex: IndexSummary | null = opts.initialIndex ?? null;
@@ -176,6 +174,7 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       sources: cfg.sources.map((s) => ({ provider: s.adapter.id, label: s.adapter.label, root: s.root })),
       capabilities: {
         openTerminal: canOpenTerminal,
+        terminalName: terminal?.name ?? null,
         handoffTargets: handoffTargets().map((a) => ({ id: a.id, label: a.label })),
       },
     };
@@ -194,7 +193,7 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       truncatedMessages: all.length - messages.length,
       related: store.related(s.id, 12),
       subagents: store.subagents(s.id),
-      resume: resume ? { ...resume, shell: shellLine(resume) } : null,
+      resume: resume ? { ...resume, shell: commandText(resumeLaunch(resume), platform) } : null,
     };
   };
 
@@ -280,6 +279,7 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
           to,
           checkIn: url.searchParams.get('checkIn') !== '0',
           handoffId: url.searchParams.get('handoffId') ?? undefined,
+          home: cfg.home,
         });
       } catch (err) {
         throw new HttpError(404, (err as Error).message);
@@ -323,18 +323,19 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
         throw new HttpError(400, (err as Error).message);
       }
       const briefPath = saveBrief(cfg.home, body.handoffId, text);
-      const line = startLine(target, from.cwd, briefPath);
+      const launch = startLaunch(target, from, briefPath, body.handoffId, platform);
+      const line = commandText(launch, platform);
       let launched = false;
       if (body.launch === true) {
-        if (!canOpenTerminal) throw new HttpError(501, 'Opening a terminal is only supported on macOS. Copy the command instead.');
-        await launchTerminal(line);
+        if (!canOpenTerminal) throw new HttpError(501, noTerminal);
+        await launchTerminal(launch);
         launched = true;
       }
       return send(res, 200, { handoffId: body.handoffId, path: briefPath, command: line, launched });
     }
 
     if (method === 'POST' && path === '/api/open-terminal') {
-      if (!canOpenTerminal) throw new HttpError(501, 'Opening a terminal is only supported on macOS. Copy the command instead.');
+      if (!canOpenTerminal) throw new HttpError(501, noTerminal);
       const body = (await readBody(req)) as { id?: unknown } | null;
       if (!body || typeof body.id !== 'string') throw new HttpError(400, 'Expected {"id": "<session id>"}.');
       let s;
@@ -345,8 +346,9 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       }
       const cmd = getAdapter(s.provider)?.resumeCommand(s);
       if (!cmd) throw new HttpError(404, `No adapter for ${s.provider}.`);
-      const line = shellLine(cmd);
-      await launchTerminal(line);
+      const launch = resumeLaunch(cmd);
+      const line = commandText(launch, platform);
+      await launchTerminal(launch);
       return send(res, 200, { ok: true, command: line });
     }
 
