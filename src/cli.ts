@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { parseArgs } from 'node:util';
@@ -8,7 +7,8 @@ import { ago, bytes, c, contextUsage, indent, providerLabel, table, tokens } fro
 import { indexSources, watchSources, type IndexSummary } from './indexer.js';
 import { openBrowser, startUiServer } from './server.js';
 import { adapterByPrefix } from './adapters/index.js';
-import { buildBrief, saveBrief, startLine } from './handoff.js';
+import { buildBrief, saveBrief, startLaunch } from './handoff.js';
+import { commandText, findTerminal, runHere } from './platform.js';
 import type { SessionRow } from './schema.js';
 import { Store } from './store.js';
 import { zstdSupported } from './util/jsonl.js';
@@ -263,26 +263,14 @@ async function cmdResume(store: Store, v: Values, args: string[]): Promise<void>
   if (!adapter) throw new Error(`No adapter for provider ${s.provider}`);
   const cmd = adapter.resumeCommand(s);
 
+  const launch = { cwd: cmd.cwd, command: cmd.command, args: cmd.args };
   if (!v.run) {
-    print(!!v.json, cmd, () => cmd.display);
+    const line = commandText(launch, process.platform);
+    print(!!v.json, { ...cmd, display: line }, () => line);
     return;
   }
-  const cwd = cmd.cwd && existsSync(cmd.cwd) ? cmd.cwd : process.cwd();
-  if (cmd.cwd && cwd !== cmd.cwd) process.stderr.write(c.yellow(`Note: ${cmd.cwd} no longer exists; running here.\n`));
-  await new Promise<void>((resolveRun, reject) => {
-    const child = spawn(cmd.command, cmd.args, { cwd, stdio: 'inherit' });
-    child.on('error', (err) =>
-      reject(
-        (err as NodeJS.ErrnoException).code === 'ENOENT'
-          ? new Error(`\`${cmd.command}\` is not installed or not on your PATH.`)
-          : err,
-      ),
-    );
-    child.on('exit', (code) => {
-      process.exitCode = code ?? 0;
-      resolveRun();
-    });
-  });
+  if (cmd.cwd && !existsSync(cmd.cwd)) process.stderr.write(c.yellow(`Note: ${cmd.cwd} no longer exists; running here.\n`));
+  process.exitCode = await runHere(launch);
 }
 
 function cmdRelated(store: Store, v: Values, args: string[]): void {
@@ -372,13 +360,14 @@ async function cmdHandoff(cfg: Config, store: Store, v: Values, args: string[]):
   const target = to ? getAdapter(to) : undefined;
   if (!to || !target?.startCommand) throw new UsageError(`Unknown tool "${v.to}". Use codex (cx) or claude-code (cc).`);
 
-  const brief = buildBrief(store, from.id, { to, checkIn: !v['no-check-in'] });
+  const brief = buildBrief(store, from.id, { to, checkIn: !v['no-check-in'], home: cfg.home });
   if (v.print) {
     process.stdout.write(brief.text);
     return;
   }
   const path = saveBrief(cfg.home, brief.handoffId, brief.text);
-  const line = startLine(target, from.cwd, path);
+  const launch = startLaunch(target, from, path, brief.handoffId);
+  const line = commandText(launch, process.platform);
 
   if (!v.run) {
     print(!!v.json, { handoffId: brief.handoffId, path, command: line, tokens: brief.tokens }, () =>
@@ -395,22 +384,14 @@ async function cmdHandoff(cfg: Config, store: Store, v: Values, args: string[]):
     return;
   }
 
-  const start = target.startCommand()!;
-  const cwd = from.cwd && existsSync(from.cwd) ? from.cwd : process.cwd();
-  if (from.cwd && cwd !== from.cwd) process.stderr.write(c.yellow(`Note: ${from.cwd} no longer exists; starting here.\n`));
+  if (from.cwd && !launch.cwd) process.stderr.write(c.yellow(`Note: ${from.cwd} no longer exists; starting here.\n`));
   process.stderr.write(c.dim(`Starting ${target.label} with the brief (${brief.handoffId})…\n`));
-  await new Promise<void>((resolveRun, reject) => {
-    const child = spawn(start.command, [...start.args, brief.text], { cwd, stdio: 'inherit' });
-    child.on('error', (err) =>
-      reject(
-        (err as NodeJS.ErrnoException).code === 'ENOENT' ? new Error(`\`${start.command}\` is not installed or not on your PATH.`) : err,
-      ),
-    );
-    child.on('exit', (code) => {
-      process.exitCode = code ?? 0;
-      resolveRun();
-    });
-  });
+  // macOS and Linux: pass the brief itself as one argument, with no shell involved.
+  // Windows: the one-line pointer prompt from startLaunch().
+  const start = target.startCommand()!;
+  process.exitCode = await runHere(
+    process.platform === 'win32' ? launch : { cwd: launch.cwd, command: start.command, args: [...start.args, brief.text] },
+  );
 }
 
 async function cmdUi(cfg: Config, store: Store, v: Values): Promise<void> {
@@ -479,7 +460,18 @@ async function cmdDoctor(cfg: Config, store: Store, v: Values): Promise<void> {
   );
   const st = store.stats();
   const errors = store.fileErrors();
-  const report = { node: process.version, fts5, zstd: zstdSupported(), dbPath: cfg.dbPath, sources, stats: st, errors };
+  const terminal = findTerminal();
+  const report = {
+    node: process.version,
+    platform: process.platform,
+    fts5,
+    zstd: zstdSupported(),
+    terminal: terminal?.name ?? null,
+    dbPath: cfg.dbPath,
+    sources,
+    stats: st,
+    errors,
+  };
 
   print(!!v.json, report, () => {
     const ok = (b: boolean) => (b ? c.green('✓') : c.red('✗'));
@@ -487,6 +479,9 @@ async function cmdDoctor(cfg: Config, store: Store, v: Values): Promise<void> {
       `${ok(true)} Node ${process.version}`,
       `${ok(fts5)} SQLite full-text search (FTS5)`,
       `${ok(zstdSupported())} zstd support ${c.dim('(compressed Codex sessions; needs Node 22.15+)')}`,
+      `${ok(!!terminal)} Open in Terminal: ${
+        terminal ? terminal.name : c.dim(process.platform === 'linux' ? 'no terminal app or graphical session found; copy commands instead' : 'not available')
+      }`,
       `${ok(true)} Index: ${cfg.dbPath} ${c.dim(`(${bytes(st.dbBytes)}, ${st.sessions} sessions)`)}`,
       '',
       ...sources.map(

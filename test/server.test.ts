@@ -6,7 +6,8 @@ import { after, before, describe, it } from 'node:test';
 import { sanitizeBoard } from '../src/board.js';
 import { loadConfig } from '../src/config.js';
 import { indexSources } from '../src/indexer.js';
-import { shellLine, startUiServer, type UiServer } from '../src/server.js';
+import { commandText } from '../src/platform.js';
+import { startUiServer, type UiServer } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { scratch } from './helpers.js';
 
@@ -64,8 +65,9 @@ describe('ui server', () => {
       port: 0,
       watch: false,
       platform: 'darwin',
-      launchTerminal: async (line) => {
-        launched.push(line);
+      terminal: { name: 'Terminal' },
+      launchTerminal: async (l) => {
+        launched.push(commandText(l, 'darwin'));
       },
     });
   });
@@ -299,44 +301,105 @@ describe('ui server', () => {
 });
 
 describe('ui server on other platforms', () => {
-  it('says opening a terminal is macOS-only instead of failing silently', async () => {
+  it('says when no terminal can be opened (Linux without a terminal app or display)', async () => {
     const s = scratch();
     const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex }, {});
     const store = new Store(cfg.dbPath);
     await indexSources(store, cfg.sources);
-    const server = await startUiServer(store, cfg, { port: 0, watch: false, platform: 'linux' });
+    const launches: unknown[] = [];
+    const server = await startUiServer(store, cfg, {
+      port: 0,
+      watch: false,
+      platform: 'linux',
+      terminal: null,
+      launchTerminal: async (l) => {
+        launches.push(l);
+      },
+    });
+    const auth = { 'X-ContextDeck-Token': server.token };
     try {
-      const r = await call(server.port, '/api/open-terminal', {
-        method: 'POST',
-        headers: { 'X-ContextDeck-Token': server.token },
-        body: { id: 'cc:0f3a1b11' },
-      });
+      const r = await call(server.port, '/api/open-terminal', { method: 'POST', headers: auth, body: { id: 'cc:0f3a1b11' } });
       assert.equal(r.status, 501);
+      assert.match(r.json().error, /No terminal app/);
       assert.equal((await call(server.port, '/api/board')).json().capabilities.openTerminal, false);
       const h = await call(server.port, '/api/handoff', {
         method: 'POST',
-        headers: { 'X-ContextDeck-Token': server.token },
+        headers: auth,
         body: { id: 'cc:0f3a1b11', to: 'codex', handoffId: 'hf_00000000dd', brief: 'b', launch: true },
       });
       assert.equal(h.status, 501);
+      assert.equal(launches.length, 0);
     } finally {
       await server.close();
       store.close();
       s.cleanup();
     }
   });
-});
 
-describe('shellLine', () => {
-  it('quotes anything that could be interpreted by the shell', () => {
-    assert.equal(
-      shellLine({ command: 'codex', args: ['resume', 'abc-123'], cwd: "/Users/a/it's here", display: '' }),
-      `cd '/Users/a/it'\\''s here' && codex resume abc-123`,
-    );
-    assert.equal(
-      shellLine({ command: 'claude', args: ['--resume', '$(rm -rf ~)'], cwd: null, display: '' }),
-      `claude --resume '$(rm -rf ~)'`,
-    );
+  it('gives PowerShell commands and a pointer prompt on Windows', async () => {
+    const s = scratch();
+    const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex }, {});
+    const store = new Store(cfg.dbPath);
+    await indexSources(store, cfg.sources);
+    const launches: unknown[] = [];
+    const server = await startUiServer(store, cfg, {
+      port: 0,
+      watch: false,
+      platform: 'win32',
+      terminal: { name: 'Windows Terminal' },
+      launchTerminal: async (l) => {
+        launches.push(l);
+      },
+    });
+    const auth = { 'X-ContextDeck-Token': server.token };
+    try {
+      const board = (await call(server.port, '/api/board')).json();
+      assert.deepEqual([board.capabilities.openTerminal, board.capabilities.terminalName], [true, 'Windows Terminal']);
+      const d = (await call(server.port, '/api/session/cx%3Ad5e6f701')).json();
+      assert.equal(d.resume.shell, 'Set-Location /Users/alice/code/acme-shop; codex resume 019a2f3c-5d6e-7f80-91a2-b3c4d5e6f701');
+      const h = await call(server.port, '/api/handoff', {
+        method: 'POST',
+        headers: auth,
+        body: { id: 'cc:0f3a1b11', to: 'codex', handoffId: 'hf_00000000ee', brief: 'brief', launch: true },
+      });
+      assert.equal(h.status, 200, h.body);
+      assert.match(
+        h.json().command,
+        /^codex 'Continue: .*Read the handoff brief in .*hf_00000000ee\.md and follow it\. \(ContextDeck handoff hf_00000000ee from claude-code:7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11\)'$/,
+      );
+      assert.equal(launches.length, 1);
+    } finally {
+      await server.close();
+      store.close();
+      s.cleanup();
+    }
+  });
+
+  it('reports a launcher failure instead of failing silently', async () => {
+    const s = scratch();
+    const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex }, {});
+    const store = new Store(cfg.dbPath);
+    await indexSources(store, cfg.sources);
+    const launches: unknown[] = [];
+    const server = await startUiServer(store, cfg, {
+      port: 0,
+      watch: false,
+      platform: 'linux',
+      terminal: { name: 'xterm' },
+      launchTerminal: async () => {
+        throw new Error('spawn xterm ENOENT');
+      },
+    });
+    const auth = { 'X-ContextDeck-Token': server.token };
+    try {
+      const r = await call(server.port, '/api/open-terminal', { method: 'POST', headers: auth, body: { id: 'cc:0f3a1b11' } });
+      assert.equal(r.status, 500);
+      assert.match(r.json().error, /Couldn't open a terminal: spawn xterm ENOENT/);
+    } finally {
+      await server.close();
+      store.close();
+      s.cleanup();
+    }
   });
 });
 

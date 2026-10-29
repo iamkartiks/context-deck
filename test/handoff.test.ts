@@ -5,9 +5,10 @@ import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { codexAdapter } from '../src/adapters/codex.js';
 import { loadConfig } from '../src/config.js';
-import { buildBrief, finalizeBrief, MAX_BRIEF_CHARS, saveBrief, startLine } from '../src/handoff.js';
+import { buildBrief, finalizeBrief, MAX_BRIEF_CHARS, pointerPrompt, saveBrief, startLaunch } from '../src/handoff.js';
 import { ensureMarker, handoffMarker, newHandoffId, parseHandoffMarker } from '../src/handoff-marker.js';
 import { indexSources } from '../src/indexer.js';
+import { commandText } from '../src/platform.js';
 import { Store } from '../src/store.js';
 import { scratch } from './helpers.js';
 
@@ -147,6 +148,23 @@ describe('handoff', () => {
     assert.doesNotMatch(second.text.split('## The goal')[1] ?? '', /## The goal/, 'no brief nested inside a brief');
   });
 
+  it('carries the original goal through a handoff started from a pointer prompt (Windows)', async () => {
+    const first = buildBrief(store, 'cc:0f3a1b11', { to: 'codex' });
+    const path = saveBrief(cfg.home, first.handoffId, first.text);
+    const from = store.resolve('cc:0f3a1b11');
+    const pointer = pointerPrompt(from.title, path, first.handoffId, from.id);
+    const id = 'aaaaaaaa-bbbb-4ccc-8ddd-000000000002';
+    writeCodexSession(s.codex, id, pointer);
+    await indexSources(store, cfg.sources);
+
+    const target = store.resolve(`codex:${id}`);
+    assert.equal(target.handoffFrom, SOURCE, 'the pointer carries the marker, so the sessions are linked');
+    const second = buildBrief(store, target.id, { to: 'claude-code', home: cfg.home });
+    assert.match(second.text, /## The goal\n\nOur auth stores the JWT in localStorage/, 'goal read from the saved brief');
+    const withoutHome = buildBrief(store, target.id, { to: 'claude-code' });
+    assert.match(withoutHome.text, /## The goal\n\nContinue: Move auth/, 'falls back to the pointer itself');
+  });
+
   it('stays within the size budget for very long sessions', async () => {
     const long = 'x'.repeat(5_000);
     const lines = [];
@@ -198,7 +216,8 @@ describe('handoff', () => {
       mkdirSync(project, { recursive: true });
       const nasty = `# Continue: x\nQuotes ' " and $(touch ${join(s.dir, 'pwned')}) and \`touch ${join(s.dir, 'pwned2')}\` and $HOME\n`;
       const path = saveBrief(join(s.dir, "home with 'quote"), 'hf_0123456789', nasty);
-      const line = startLine(codexAdapter, project, path);
+      const from = { ...store.resolve('cc:0f3a1b11'), cwd: project };
+      const line = commandText(startLaunch(codexAdapter, from, path, 'hf_0123456789', 'linux'), 'linux');
 
       const r = spawnSync('bash', ['-c', line], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, encoding: 'utf8' });
       assert.equal(r.status, 0, r.stderr);
@@ -213,6 +232,20 @@ describe('handoff', () => {
   );
 
   it('starts in the current folder when the project folder is gone', () => {
-    assert.equal(startLine(codexAdapter, '/definitely/not/here', '/tmp/b.md'), `codex "$(cat /tmp/b.md)"`);
+    const from = { ...store.resolve('cc:0f3a1b11'), cwd: '/definitely/not/here' };
+    assert.equal(commandText(startLaunch(codexAdapter, from, '/tmp/b.md', 'hf_0123456789', 'darwin'), 'darwin'), `codex "$(cat /tmp/b.md)"`);
+  });
+
+  it('starts Windows tools with a one-line pointer to the brief', () => {
+    const from = { ...store.resolve('cc:0f3a1b11'), title: 'Fix "quotes" & 100% <of> it; then $go' };
+    const l = startLaunch(codexAdapter, from, 'C:\\Users\\alice\\.contextdeck\\handoffs\\hf_0123456789.md', 'hf_0123456789', 'win32');
+    assert.equal(l.args.length, 1);
+    assert.equal(
+      l.args[0],
+      `Continue: Fix quotes 100 of it then go. Read the handoff brief in C:\\Users\\alice\\.contextdeck\\handoffs\\hf_0123456789.md and follow it. (ContextDeck handoff hf_0123456789 from ${SOURCE})`,
+    );
+    assert.deepEqual(parseHandoffMarker(l.args[0]!), { id: 'hf_0123456789', from: SOURCE });
+    assert.equal(l.posixTail, undefined);
+    assert.match(commandText(l, 'win32'), /^codex 'Continue: Fix quotes .* follow it\. \(ContextDeck handoff hf_0123456789 from claude-code:[0-9a-f-]+\)'$/);
   });
 });
