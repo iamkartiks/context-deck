@@ -7,6 +7,7 @@ import { ago, bytes, c, contextUsage, indent, providerLabel, table, tokens } fro
 import { indexSources, watchSources, type IndexSummary } from './indexer.js';
 import { openBrowser, startUiServer } from './server.js';
 import { adapterByPrefix } from './adapters/index.js';
+import { decisionMatches, loadDecisions, resolveDecisions, type ResolvedDecision } from './decisions.js';
 import { buildBrief, saveBrief, startLaunch } from './handoff.js';
 import { commandText, findTerminal, runHere } from './platform.js';
 import type { SessionRow } from './schema.js';
@@ -28,9 +29,10 @@ ${c.bold('Usage')}
   contextdeck <command> [options]
 
 ${c.bold('Commands')}
-  index               Scan Claude Code and Codex session files into the local index
+  index               Scan Claude Code, Codex and Qwen Code session files into the local index
   list                Recent sessions across every tool
   search <query>      Full-text search across every session ("quoted phrase", prefix*)
+  decisions [query]   Decisions you marked, across every tool (mark them in the canvas)
   show <id>           Session details, files touched and the last messages
   resume <id>         Print (or --run) the command that reopens a session in its own tool
   handoff <id>        Continue a session's work in a new session, in any tool
@@ -187,7 +189,41 @@ function cmdList(store: Store, v: Values): void {
   print(!!v.json, rows, () => sessionTable(rows));
 }
 
-function cmdSearch(store: Store, v: Values, args: string[]): void {
+function decisionLine(d: ResolvedDecision): string {
+  const s = d.session;
+  const where = s ? `${c.bold(s.shortId)}  ${providerLabel(s.provider)}  ${s.project ?? '—'}  ${c.dim(ago(d.createdAt))}` : c.dim('(session no longer indexed)');
+  const text = d.text.replace(/\n+/g, ' ');
+  return `${c.green('◆')} ${text}\n  ${where}${d.anchored ? '' : c.dim('  · message no longer found; your words are kept')}`;
+}
+
+function cmdDecisions(cfg: Config, store: Store, v: Values, args: string[]): void {
+  const query = args.join(' ').trim();
+  const project = v.project;
+  const provider = v.provider ? (adapterByPrefix(v.provider)?.id ?? v.provider) : null;
+  const all = resolveDecisions(store, loadDecisions(cfg.home).decisions).filter(
+    (d) =>
+      (!query || decisionMatches(d, query)) &&
+      (!project || d.session?.project === project || d.session?.cwd === project) &&
+      (!provider || d.session?.provider === provider),
+  );
+  const rows = all.slice(0, intOpt(v.limit, 50, 'limit'));
+  print(
+    !!v.json,
+    rows.map(({ session, ...d }) => ({ ...d, session: session ? { id: session.id, shortId: session.shortId, title: session.title, provider: session.provider, project: session.project } : null })),
+    () => {
+      if (!rows.length) {
+        return c.dim(
+          query || project || provider
+            ? 'No decisions match.'
+            : 'No decisions yet. In the canvas (`contextdeck ui`), open a session and choose “Mark as decision” on the message that settled something.',
+        );
+      }
+      return rows.map(decisionLine).join('\n\n');
+    },
+  );
+}
+
+function cmdSearch(cfg: Config, store: Store, v: Values, args: string[]): void {
   const query = args.join(' ').trim();
   if (!query) throw new UsageError('Usage: contextdeck search <query>');
   const hits = store.search(query, {
@@ -196,9 +232,12 @@ function cmdSearch(store: Store, v: Values, args: string[]): void {
     limit: intOpt(v.limit, 20, 'limit'),
     raw: v.raw,
   });
+  // JSON output stays a plain list of hits; `contextdeck decisions <query> --json` covers decisions
+  const decisions = v.json ? [] : resolveDecisions(store, loadDecisions(cfg.home).decisions).filter((d) => decisionMatches(d, query));
   print(!!v.json, hits, () => {
-    if (hits.length === 0) return c.dim(`No matches for ${JSON.stringify(query)}.`);
-    return hits
+    const head = decisions.length ? `${c.bold('Decisions')}\n${decisions.slice(0, 10).map(decisionLine).join('\n\n')}\n\n${c.bold('Messages')}\n` : '';
+    if (hits.length === 0) return head + c.dim(`No messages match ${JSON.stringify(query)}.`);
+    return head + hits
       .map((h) => {
         const s = h.session;
         const head = `${c.bold(s.shortId)}  ${providerLabel(s.provider)}  ${s.project ?? '—'}  ${c.dim(ago(s.updatedAt))}  ${s.title}`;
@@ -214,7 +253,7 @@ function useHighlight(fallback: string, close = false): string {
   return close ? '\x1b[22;39m' : '\x1b[1;33m';
 }
 
-function cmdShow(store: Store, v: Values, args: string[]): void {
+function cmdShow(cfg: Config, store: Store, v: Values, args: string[]): void {
   const ref = args[0];
   if (!ref) throw new UsageError('Usage: contextdeck show <id>');
   const s = store.resolve(ref);
@@ -222,8 +261,12 @@ function cmdShow(store: Store, v: Values, args: string[]): void {
   const messages = store.messages(s.id, { last, roles: v.all ? undefined : ['user', 'assistant'] });
   const files = store.filesTouched(s.id);
   const resume = getAdapter(s.provider)?.resumeCommand(s);
+  const decisions = resolveDecisions(
+    store,
+    loadDecisions(cfg.home).decisions.filter((d) => d.sessionId === s.id),
+  ).sort((a, b) => a.seq - b.seq);
 
-  print(!!v.json, { session: s, filesTouched: files, messages, resume }, () => {
+  print(!!v.json, { session: s, filesTouched: files, messages, resume, decisions: decisions.map(({ session: _s, ...d }) => d) }, () => {
     const meta: [string, string][] = [
       ['Tool', `${providerLabel(s.provider)}${s.cliVersion ? c.dim(` ${s.cliVersion}`) : ''}`],
       ['Id', s.id],
@@ -239,6 +282,10 @@ function cmdShow(store: Store, v: Values, args: string[]): void {
     meta.push(['File', c.dim(s.sourcePath)]);
 
     const out = [c.bold(s.title), '', ...meta.map(([k, val]) => `${c.dim(k.padEnd(8))} ${val}`)];
+    if (decisions.length) {
+      out.push('', c.bold(`Decisions (${decisions.length})`));
+      out.push(...decisions.map((d) => `  ${c.green('◆')} ${d.text.replace(/\n+/g, ' ')}`));
+    }
     if (files.length) {
       out.push('', c.bold(`Files touched (${files.length})`));
       out.push(...files.slice(0, 15).map((f) => `  ${f}`));
@@ -542,10 +589,13 @@ export async function main(argv: string[]): Promise<number> {
         break;
       case 'search':
       case 'find':
-        cmdSearch(store, v, args);
+        cmdSearch(cfg, store, v, args);
+        break;
+      case 'decisions':
+        cmdDecisions(cfg, store, v, args);
         break;
       case 'show':
-        cmdShow(store, v, args);
+        cmdShow(cfg, store, v, args);
         break;
       case 'handoff':
       case 'continue':

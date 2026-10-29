@@ -79,11 +79,13 @@ contextdeck ui      # indexes, then opens the canvas in your browser
 | **Move around** | Drag the background, or scroll. Pinch or ⌘/Ctrl+scroll to zoom. `+` `-` zoom, `0` shows everything. |
 | **Arrange** | Drag cards anywhere; positions are saved per grouping. **Tidy up** lines everything up in a grid; **Scatter** goes back to the loose layout with your placements. |
 | **Group by** | **Workstream** (linked work across tools), **Project**, **Tool** or **Day**. Threads between cards show sessions that edited the same files. |
-| **Search** | Press `/`. The board narrows to matching sessions (searching their full conversations, titles, projects and branches) and zooms to fit them. |
-| **Read** | Click a card: context use over the session (real per-turn data, with each compaction marked), files it changed, related sessions in other tools, subagents, and the conversation (tool calls hidden unless you ask). |
+| **Search** | Press `/`. The board narrows to matching sessions (searching their full conversations, titles, projects and branches) and each card shows the line that matched and how many times. Open one and it scrolls to that message. |
+| **Read** | Click a card: context use over the session (real per-turn data, with each compaction marked), files it changed, related sessions in other tools, subagents, and the conversation (tool calls hidden unless you ask). **Find in this conversation** steps through every match, loading older parts of long sessions as needed. |
+| **Decisions** | Hover a message and choose **Mark as decision** (select part of it first to quote just that). See [Decisions](#decisions). |
 | **Resume** | **Copy command**, or **Open in Terminal**, which runs it in a new terminal window in the right folder (see [Windows, macOS and Linux](#windows-macos-and-linux)). |
 | **Hand off** | **Continue in…** another tool, or start a **fresh session** in the same one, from a brief you can edit. See [Handoff](#handoff). |
 | **List view** | Every session in rows, grouped the same way as the canvas. Handy on small screens. |
+| **Decisions view** | Every decision you marked, by project, newest first. Search filters them too. |
 
 Options: `--port <n>`, `--no-open`. The page loads nothing from the internet (fonts are bundled) and only this computer can reach it; see [SECURITY.md](SECURITY.md) for how it's locked down.
 
@@ -96,8 +98,9 @@ Claude Code doesn't record how big its context window is, so its fill level is a
 | `ui` | Open the canvas in your browser (see above). |
 | `index [--full]` | Scan session files into the index. Incremental: only changed files are re-read. |
 | `list` | Recent sessions across every tool. `--all` includes subagents. |
-| `search <query>` | Full-text search. Words are ANDed; `"exact phrase"`, `prefix*` and `OR` work. |
-| `show <id>` | Metadata, files touched, context usage, last messages and the resume command. `--all` adds tool calls, `-m 30` shows more. |
+| `search <query>` | Full-text search. Words are ANDed; `"exact phrase"`, `prefix*` and `OR` work. Matching decisions are listed first. |
+| `decisions [query]` | Decisions you marked, across every tool. `--project`, `-p` and `--json` work here too. |
+| `show <id>` | Metadata, decisions, files touched, context usage, last messages and the resume command. `--all` adds tool calls, `-m 30` shows more. |
 | `resume <id> [--run]` | Print, or run, the command that reopens the session in its own tool and folder. |
 | `handoff <id> [--to codex\|claude-code] [--print\|--run]` | Continue a session's work in a new session. Saves a brief and prints the command that starts it; `--run` starts it here, `--print` just shows the brief. Defaults to the other tool. |
 | `related <id>` | Sessions in *any* tool that edited the same files (or share the branch). |
@@ -113,7 +116,7 @@ Common options: `-p claude-code|codex` (or `cc|cx`), `--project <name>`, `-n <li
 
 Sometimes the next step belongs in a different tool, or the current window is too full to think in. A handoff starts a new session that knows what the old one knew.
 
-1. **Brief.** ContextDeck writes it from what's already indexed: the goal, your later instructions, the previous session's last replies, the files it changed and the commands it ran, plus instructions to check `git status` first and not redo finished work. By default the new agent summarises where things stand and waits for your go-ahead; turn that off to let it carry on. The brief is a few hundred to a few thousand tokens, at most about 6k.
+1. **Brief.** ContextDeck writes it from what's already indexed: the goal, your later instructions, the [decisions](#decisions) you marked, the previous session's last replies, the files it changed and the commands it ran, plus instructions to check `git status` first and not redo finished work. By default the new agent summarises where things stand and waits for your go-ahead; turn that off to let it carry on. The brief is a few hundred to a few thousand tokens, at most about 6k.
 2. **Review.** You see the whole brief, can edit anything, and see how much of the new window it uses. Nothing has left your computer yet.
 3. **Start.** **Open in Terminal** or **Copy command** runs, for example, `cd ~/code/shop && codex "$(cat ~/.contextdeck/handoffs/hf_….md)"`. Briefs are kept in `~/.contextdeck/handoffs/`, readable only by you. On Windows the new session starts with a one-line message pointing at the brief file instead, because a long multi-line message can't be passed safely through the Windows command line; the agent reads the file and carries on.
 4. **Link.** The brief carries a line like `(ContextDeck handoff hf_1a2b3c4d5e from claude-code:…)`. When the new session is indexed, ContextDeck reads it and links the two sessions. Because the link lives in the transcript, it survives rebuilding the index.
@@ -121,6 +124,21 @@ Sometimes the next step belongs in a different tool, or the current window is to
 **Privacy:** starting a handoff to a different tool sends the brief to that tool's company (OpenAI for Codex, Anthropic for Claude Code), the same as typing it yourself. For Qwen Code it goes to whichever model Qwen Code is set up to use: nowhere, if that's a local model. The brief is built from redacted text, but read it before you start.
 
 The brief is assembled from the session itself, not written by an AI, so it's instant, free and works offline. An optional AI-written summary is on the [roadmap](docs/ROADMAP.md).
+
+## Decisions
+
+Long sessions bury the moment something got settled: "use Postgres", "keep the old header for one release". Six sessions later, nobody remembers which one it was in.
+
+![Searching "mobile header" days later: the card shows the decision that matched, and the side panel opens at the message where it was decided.](docs/images/decisions.png)
+
+**Mark it when it happens.** In any session's conversation, choose **Mark as decision** on the message that settled it, and write it the way you'd want to read it later (or select part of the message first to quote just that). Then:
+
+- the session's card shows a flag with the count, and the side panel lists its decisions at the top, each a click away from the message it came from;
+- the **Decisions** view lists every decision across tools and projects;
+- search finds decisions as well as messages, and a matching decision is what the card shows;
+- every handoff brief includes the decisions from that session *and* the sessions it continued from, under "Decisions already made", with an instruction not to reopen them unless you ask.
+
+Decisions are yours, so they're kept in `~/.contextdeck/decisions.json` (readable only by you), not in the index: rebuilding the index never loses them. If a session file changes and the message moves, it's found again; if it's gone, your words are kept.
 
 ## Where it looks
 
@@ -132,6 +150,7 @@ The brief is assembled from the session itself, not written by an AI, so it's in
 | The index | `~/.contextdeck/index.db` | `--home`, `CONTEXTDECK_HOME` |
 | Your canvas arrangement | `~/.contextdeck/board.json` | same folder as the index |
 | Handoff briefs | `~/.contextdeck/handoffs/` | same folder as the index |
+| Your decisions | `~/.contextdeck/decisions.json` | same folder as the index |
 
 ## Windows, macOS and Linux
 

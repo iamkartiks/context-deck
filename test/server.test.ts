@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -405,6 +405,118 @@ describe('ui server on other platforms', () => {
       store.close();
       s.cleanup();
     }
+  });
+});
+
+describe('ui server: finding things and decisions', () => {
+  const s = scratch();
+  const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex, qwenDir: s.qwen }, {});
+  let store: Store;
+  let server: UiServer;
+  const auth = () => ({ 'X-ContextDeck-Token': server.token });
+
+  before(async () => {
+    store = new Store(cfg.dbPath);
+    await indexSources(store, cfg.sources);
+    server = await startUiServer(store, cfg, { port: 0, watch: false, terminal: null });
+  });
+  after(async () => {
+    await server.close();
+    store.close();
+    s.cleanup();
+  });
+
+  it('says which message matched, so the panel can open there', async () => {
+    const d = (await call(server.port, '/api/search?q=%22refresh%20path%22')).json();
+    const cx = d.hits.find((x: { session: { provider: string } }) => x.session.provider === 'codex');
+    assert.ok(Number.isInteger(cx.seq));
+    const msg = store.messageAt(cx.session.id, cx.seq);
+    assert.match(msg!.text, /refresh path/i);
+    assert.deepEqual(d.decisions, []);
+  });
+
+  it('lists every match inside one session, in order', async () => {
+    const r = await call(server.port, '/api/matches?id=cc%3A0f3a1b11&q=cookie');
+    assert.equal(r.status, 200);
+    const seqs = r.json().matches.map((m: { seq: number }) => m.seq);
+    assert.ok(seqs.length >= 2);
+    assert.deepEqual(seqs, [...seqs].sort((a: number, b: number) => a - b));
+    assert.match(r.json().matches[0].snippet, /«cookie/i);
+    assert.equal((await call(server.port, '/api/matches?id=nope&q=x')).status, 404);
+    assert.deepEqual((await call(server.port, '/api/matches?id=cc%3A0f3a1b11&q=')).json().matches, []);
+  });
+
+  it('sends the part of a long session around a message', async () => {
+    // A session longer than the panel's window (600 messages)
+    const dir = join(s.claude, 'projects/-w-long');
+    mkdirSync(dir, { recursive: true });
+    const id = 'cccccccc-0000-4000-8000-000000000001';
+    const lines = [];
+    for (let i = 0; i < 400; i++) {
+      lines.push(JSON.stringify({ type: 'user', sessionId: id, cwd: '/w/long', timestamp: '2026-10-29T00:00:00Z', message: { role: 'user', content: `question ${i}${i === 7 ? ' needle' : ''}` } }));
+      lines.push(JSON.stringify({ type: 'assistant', sessionId: id, cwd: '/w/long', timestamp: '2026-10-29T00:00:01Z', message: { id: `m${i}`, role: 'assistant', content: [{ type: 'text', text: `answer ${i}` }] } }));
+    }
+    writeFileSync(join(dir, `${id}.jsonl`), lines.join('\n') + '\n');
+    await indexSources(store, cfg.sources);
+    const latest = (await call(server.port, `/api/session/claude-code%3A${id}`)).json();
+    assert.equal(latest.messages.length, 600);
+    assert.equal(latest.truncatedMessages, 200);
+    assert.equal(latest.truncatedAfter, 0);
+    const needle = (await call(server.port, `/api/matches?id=claude-code%3A${id}&q=needle`)).json().matches[0].seq;
+    const around = (await call(server.port, `/api/session/claude-code%3A${id}?around=${needle}`)).json();
+    assert.ok(around.messages.some((m: { seq: number }) => m.seq === needle), 'the match is in the window');
+    assert.equal(around.truncatedMessages, 0);
+    assert.equal(around.truncatedAfter, 200);
+    assert.equal((await call(server.port, `/api/session/claude-code%3A${id}?around=abc`)).json().truncatedMessages, 200, 'bad values are ignored');
+  });
+
+  it('adds, edits and removes decisions, with the token only', async () => {
+    const seq = store.matchesIn(store.resolve('cc:0f3a1b11').id, 'httpOnly')[0]!.seq;
+    const body = { sessionId: 'cc:0f3a1b11', seq, text: 'Use httpOnly cookies' };
+    assert.equal((await call(server.port, '/api/decisions', { method: 'POST', body })).status, 403, 'needs the token');
+    assert.equal(
+      (await call(server.port, '/api/decisions', { method: 'POST', body, headers: { ...auth(), Origin: 'https://evil.example' } })).status,
+      403,
+      'and the right origin',
+    );
+    const r = await call(server.port, '/api/decisions', { method: 'POST', body, headers: auth() });
+    assert.equal(r.status, 201, r.body);
+    const d = r.json();
+    assert.equal(d.text, 'Use httpOnly cookies');
+    assert.equal(d.anchored, true);
+    assert.equal(d.session.shortId, 'cc:0f3a1b11');
+
+    const post = (b: unknown) => call(server.port, '/api/decisions', { method: 'POST', body: b, headers: auth() });
+    assert.equal((await post({ sessionId: 'cc:0f3a1b11', seq: '1', text: 'x' })).status, 400);
+    assert.equal((await post({ sessionId: 'cc:0f3a1b11', seq: 99999, text: 'x' })).status, 400);
+    assert.equal((await post({ sessionId: 'nope', seq: 0, text: 'x' })).status, 404);
+    assert.equal((await post({ sessionId: 'cc:0f3a1b11', seq, text: '  ' })).status, 400);
+
+    // Shown on the board, in the session, in search and in the list
+    assert.equal((await call(server.port, '/api/board')).json().decisionCounts['claude-code:7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11'], 1);
+    const detail = (await call(server.port, '/api/session/cc%3A0f3a1b11')).json();
+    assert.deepEqual(detail.decisions.map((x: { text: string; seq: number }) => [x.text, x.seq]), [['Use httpOnly cookies', seq]]);
+    const found = (await call(server.port, '/api/search?q=httponly%20cookies')).json();
+    assert.deepEqual(found.decisions.map((x: { id: string }) => x.id), [d.id]);
+    assert.deepEqual((await call(server.port, '/api/search?q=httponly&provider=codex')).json().decisions, [], 'provider filter applies');
+    assert.equal((await call(server.port, '/api/decisions')).json().decisions.length, 1);
+
+    const put = await call(server.port, `/api/decisions/${d.id}`, { method: 'PUT', body: { text: 'httpOnly cookies, SameSite=Lax' }, headers: auth() });
+    assert.equal(put.status, 200);
+    assert.equal(put.json().text, 'httpOnly cookies, SameSite=Lax');
+    assert.equal((await call(server.port, `/api/decisions/${d.id}`, { method: 'PUT', body: {}, headers: auth() })).status, 400);
+    assert.equal((await call(server.port, '/api/decisions/../../etc', { method: 'DELETE', headers: auth() })).status, 404);
+    assert.equal((await call(server.port, '/api/decisions/d_ffffffffff', { method: 'DELETE', headers: auth() })).status, 404);
+    assert.equal((await call(server.port, `/api/decisions/${d.id}`, { method: 'DELETE' })).status, 403);
+    assert.equal((await call(server.port, `/api/decisions/${d.id}`, { method: 'DELETE', headers: auth() })).status, 200);
+    assert.deepEqual((await call(server.port, '/api/decisions')).json().decisions, []);
+  });
+
+  it('puts decisions in the handoff preview', async () => {
+    const seq = store.matchesIn(store.resolve('cc:0f3a1b11').id, 'httpOnly')[0]!.seq;
+    await call(server.port, '/api/decisions', { method: 'POST', body: { sessionId: 'cc:0f3a1b11', seq, text: 'Keep the header path for mobile' }, headers: auth() });
+    const p = (await call(server.port, '/api/handoff/preview?id=cc%3A0f3a1b11&to=codex')).json();
+    assert.match(p.brief, /## Decisions already made\n\n- Keep the header path for mobile\n/);
   });
 });
 

@@ -70,7 +70,7 @@ Linked groups are named after their feature branch, or else after the files that
 
 Continuing a session's work in a new session, in the same or another tool.
 
-1. **`buildBrief()`** reads the session from the index and writes a markdown brief: title, marker line, where things are (folder, branch, previous tool and model, context use), the goal (first prompt), later instructions (other user prompts, newest 12, slash commands skipped), the last two replies, files changed (relative to the project), recent tool calls (pure reads and searches left out), and how to pick up. It shrinks in steps to stay under 24,000 characters. If the session was itself started from a handoff, the original goal is pulled out of its brief instead of nesting briefs.
+1. **`buildBrief()`** reads the session from the index and writes a markdown brief: title, marker line, where things are (folder, branch, previous tool and model, context use), the goal (first prompt), later instructions (other user prompts, newest 12, slash commands skipped), decisions you marked in this session and the ones it continued from (kept even when the brief shrinks), the last two replies, files changed (relative to the project), recent tool calls (pure reads and searches left out), and how to pick up. It shrinks in steps to stay under 24,000 characters. If the session was itself started from a handoff, the original goal is pulled out of its brief instead of nesting briefs.
 2. **The marker**: `(ContextDeck handoff hf_<10 hex> from <provider>:<session id>)`. `finalizeBrief()` puts it back if the person deleted or changed it while editing.
 3. **`saveBrief()`** writes `~/.contextdeck/handoffs/<id>.md` (directory 0700, file 0600).
 4. **`startLaunch()`** describes how to start the target tool from the adapter's `startCommand()`. On macOS and Linux that's `cd <project> && <tool> "$(cat <brief file>)"`: both paths are shell-quoted, and the brief is read with `$(cat …)` inside double quotes, so its contents reach the tool as one argument and are never interpreted by the shell (there's a test for exactly that, with `$(…)` and backticks in the brief). On Windows a multi-line argument can't pass safely through cmd.exe, so the first message is a one-line pointer to the brief file, carrying the marker; a later handoff reads the original goal back from the saved brief. If the project folder no longer exists, it is left out.
@@ -83,16 +83,25 @@ An adapter becomes a handoff target by implementing `startCommand()` (and option
 
 The CLI (`src/cli.ts`) is a thin layer over the store. Every command supports `--json`; changing its shape is a breaking change.
 
+### Decisions (`src/decisions.ts`)
+
+A decision is a message you marked because it settled something, in your own words. Like the canvas layout, decisions are things you made, so they live in `~/.contextdeck/decisions.json` (written atomically, mode 0600), never in `index.db`.
+
+Each one stores the session id, the message's position (`seq`) and a sha256 fingerprint of the message text. `resolveDecisions()` checks the message at that position; if a re-index moved it, it finds the message again by fingerprint; if it's gone, the decision is shown as "no longer in the session" with your words intact. `decisionsForChain()` follows `handoff_from` links back from a session so briefs carry decisions from earlier sessions too.
+
 ### The UI server (`src/server.ts`)
 
 `contextdeck ui` indexes, then starts a `node:http` server on `127.0.0.1`. It serves the files in `ui/` from a fixed allow-list and a small JSON API:
 
 | Route | |
 |---|---|
-| `GET /api/board` | All top-level sessions, workstreams, edges, subagent counts, providers, capabilities |
-| `GET /api/session/:id` | One session: messages (last 600), files, context over time, related, subagents, resume command |
-| `GET /api/search?q=` | Full-text search hits with snippets |
-| `GET /api/events` | Server-sent events; `index` fires whenever the watcher re-indexes |
+| `GET /api/board` | All top-level sessions, workstreams, edges, subagent and decision counts, providers, capabilities |
+| `GET /api/session/:id[?around=<seq>]` | One session: a window of 600 messages (the latest, or around a message when jumping to a match or decision), its decisions, files, context over time, related, subagents, resume command |
+| `GET /api/search?q=` | Full-text search: per session, the best-matching message (its snippet and position) and the number of matches; plus matching decisions |
+| `GET /api/matches?id=&q=` | Every matching message in one session, in order, for "find in this conversation" |
+| `GET /api/decisions` | Every decision, with where it is now and a summary of its session |
+| `POST /api/decisions` · `PUT` / `DELETE /api/decisions/:id` | Mark, edit and remove decisions (stored in `decisions.json`) |
+| `GET /api/events` | Server-sent events; `index` fires whenever the watcher re-indexes, `decisions` when decisions change |
 | `GET` / `PUT /api/layout` | Hand-placed card positions, stored in `board.json` (not in the index, so rebuilding the index never loses them) |
 | `POST /api/reindex` | Rescan now |
 | `POST /api/open-terminal` | Run a session's resume command in a new terminal window (501 when none is available) |
@@ -106,7 +115,8 @@ Writes need the per-run token embedded in the page; see [SECURITY.md](../SECURIT
 `index.html`, `style.css` and `app.js`: no framework, no build step, no dependencies. It is one ES module with plain DOM rendering (cards are reused between renders, zones and threads are redrawn). Worth knowing before changing it:
 
 - **Layout** is computed in the browser. Each group becomes a zone sized to its cards; zones are shelf-packed, trying many row widths and keeping the one whose shape best fits the screen. Hand-placed positions override the automatic ones, per grouping, and zones stretch around wherever their cards actually are.
-- **Session text is never parsed as HTML.** Everything goes through `h()`, which creates text nodes. Search highlights come back from the server as `«…»` markers and are turned into `<mark>` elements by splitting strings.
+- **Session text is never parsed as HTML.** Everything goes through `h()`, which creates text nodes. Search highlights come back from the server as `«…»` markers and are turned into `<mark>` elements by splitting strings; highlights inside the side panel are made the same way, from the search words.
+- **Which match a card shows.** The store ranks every matching message with bm25 and keeps the best one per session, halving the score of tool output so a line from the conversation wins over a file path that happens to match. A matching decision beats both.
 - **Context fill** uses the real window for Codex and Qwen Code (both record it) and an estimate for Claude Code (200k, or 1M once a session has gone past 200k), shown as "~200k".
 - **Context over time.** Adapters record the context size after every model turn (`contextSeries`) and where compactions happened (`compactionPoints`). The store keeps at most 120 points per session (`downsampleSeries`) in `sessions.context_series`, and `GET /api/session/:id` returns it for the chart in the side panel.
 - **Design.** The look comes from the "minimal organiser" design: ground `#E4E3DF`, surface `#F7F6F2`, ink `#161616`, one accent (`#F4C95D`, Claude Code), a warm grey (`#B7B3AA`, Codex) and a soft violet (`#B4A7E6`, Qwen Code). Each tool also has its own marker shape (circle, square, diamond), so they're told apart without colour. Tokens are CSS custom properties at the top of `style.css`; Geist and Geist Mono are bundled under `ui/fonts/` (SIL OFL). Cards stay paper-coloured in dark mode.

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
+import { addDecision } from '../src/decisions.js';
+import { Store } from '../src/store.js';
 import { REPO, scratch } from './helpers.js';
 
 const s = scratch();
@@ -85,6 +87,29 @@ describe('cli', () => {
     assert.equal(JSON.parse(run('handoff', 'cc:0f3a1b11', '--to', 'qw', '--json').out).command.startsWith('qwen -i '), true);
     assert.equal(run('handoff', 'cc:0f3a1b11', '--to', 'gemini').code, 2);
     assert.equal(run('handoff').code, 2);
+  });
+
+  it('lists decisions, and shows them in search and show', () => {
+    assert.match(run('decisions').out, /No decisions yet/);
+    const store = new Store(join(s.home, 'index.db'));
+    try {
+      const id = store.resolve('cc:0f3a1b11').id;
+      const seq = store.matchesIn(id, 'httpOnly')[0]!.seq;
+      addDecision(s.home, store, { sessionId: id, seq, text: 'Use httpOnly session cookies' });
+    } finally {
+      store.close();
+    }
+    const list = run('decisions');
+    assert.equal(list.code, 0, list.err);
+    assert.match(list.out, /◆ Use httpOnly session cookies\n  cc:0f3a1b11  Claude Code  acme-shop/);
+    assert.match(run('decisions', 'cookies').out, /Use httpOnly/);
+    assert.match(run('decisions', 'postgres').out, /No decisions match/);
+    const json = JSON.parse(run('decisions', '--json').out);
+    assert.equal(json[0].text, 'Use httpOnly session cookies');
+    assert.equal(json[0].session.shortId, 'cc:0f3a1b11');
+    assert.match(run('search', 'httponly').out, /^Decisions\n◆ Use httpOnly session cookies/);
+    assert.ok(Array.isArray(JSON.parse(run('search', 'httponly', '--json').out)), 'search --json stays a list of hits');
+    assert.match(run('show', 'cc:0f3a1b11').out, /Decisions \(1\)\n  ◆ Use httpOnly session cookies/);
   });
 
   it('uses exit code 2 for usage errors and 1 for failures', () => {

@@ -4,6 +4,24 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-29
+
+Find the session where something was decided.
+
+### Added
+
+- **Search shows where it matched.** While searching, each card (and list row) shows the line that matched, with the words highlighted, and how many messages match. Opening a session scrolls to that message.
+- **Find in this conversation.** A find bar in the side panel steps through every match in the session (Enter / Shift+Enter), loading older parts of long sessions as needed. Matching tool output is shown even when tool calls are hidden.
+- **Decisions.** Choose **Mark as decision** on any message (select part of it first to quote just that) and write what was settled. Decisions show on cards (a flag and a count), at the top of the side panel, in a new **Decisions** view, and in search. Edit or remove them any time.
+- **Decisions travel with handoffs.** Briefs get a "Decisions already made" section with the decisions from the session and every session it continued from, and the new agent is asked not to reopen them unless you say so.
+- `contextdeck decisions [query]`; `search` lists matching decisions first; `show` lists a session's decisions.
+- Decisions live in `~/.contextdeck/decisions.json` (owner-only), so rebuilding the index never loses them. A message that moves is found again by its fingerprint; one that's gone keeps your words.
+
+### Changed
+
+- The best match for a session prefers the conversation over tool output, so cards show what was said rather than a file path that happened to match.
+- On phones the tool filters show only their marker and count, so three tools fit.
+
 ## [0.6.0] - 2026-10-29
 
 Qwen Code, and with it local and open models.

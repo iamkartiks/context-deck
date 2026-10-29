@@ -6,6 +6,16 @@ import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { getAdapter, type ResumeCommand } from './adapters/index.js';
 import { loadBoard, sanitizeBoard, saveBoard } from './board.js';
+import {
+  addDecision,
+  decisionMatches,
+  deleteDecision,
+  isDecisionId,
+  loadDecisions,
+  resolveDecisions,
+  updateDecision,
+  type ResolvedDecision,
+} from './decisions.js';
 import type { Config } from './config.js';
 import { indexSources, watchSources, type IndexSummary, type Watcher } from './indexer.js';
 import type { Store } from './store.js';
@@ -163,6 +173,7 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       version,
       generatedAt: new Date().toISOString(),
       sessions,
+      decisionCounts: decisionCounts(),
       subagentCounts: store.subagentCounts(),
       ...graph,
       providers: [...new Set(sessions.map((s) => s.provider))].sort().map((id) => ({
@@ -180,17 +191,64 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
     };
   };
 
-  const sessionDetail = (ref: string) => {
+  const decisionCounts = () => {
+    const counts: Record<string, number> = {};
+    for (const d of loadDecisions(cfg.home).decisions) counts[d.sessionId] = (counts[d.sessionId] ?? 0) + 1;
+    return counts;
+  };
+
+  /** A decision as the UI needs it: the decision plus a short summary of its session. */
+  const decisionView = (d: ResolvedDecision) => ({
+    id: d.id,
+    sessionId: d.sessionId,
+    seq: d.seq,
+    text: d.text,
+    anchored: d.anchored,
+    createdAt: d.createdAt,
+    updatedAt: d.updatedAt,
+    session: d.session
+      ? {
+          id: d.session.id,
+          shortId: d.session.shortId,
+          title: d.session.title,
+          provider: d.session.provider,
+          project: d.session.project,
+          cwd: d.session.cwd,
+          gitBranch: d.session.gitBranch,
+          updatedAt: d.session.updatedAt,
+        }
+      : null,
+  });
+
+  const allDecisions = () => resolveDecisions(store, loadDecisions(cfg.home).decisions);
+
+  /**
+   * One session for the side panel. Long sessions send a window of messages:
+   * the latest ones, or the ones around `around` when jumping to a search
+   * match or a decision.
+   */
+  const sessionDetail = (ref: string, around?: number) => {
     const s = store.resolve(ref);
     const resume = getAdapter(s.provider)?.resumeCommand(s) ?? null;
     const all = store.messages(s.id);
-    const messages = all.length > MAX_MESSAGES ? all.slice(-MAX_MESSAGES) : all;
+    let start = Math.max(0, all.length - MAX_MESSAGES);
+    if (around != null && all.length > MAX_MESSAGES) {
+      const at = all.findIndex((m) => m.seq >= around);
+      if (at >= 0) start = Math.min(Math.max(0, at - Math.floor(MAX_MESSAGES / 2)), all.length - MAX_MESSAGES);
+    }
+    const messages = all.slice(start, start + MAX_MESSAGES);
+    const decisions = resolveDecisions(
+      store,
+      loadDecisions(cfg.home).decisions.filter((d) => d.sessionId === s.id),
+    ).sort((a, b) => a.seq - b.seq);
     return {
       session: s,
       filesTouched: store.filesTouched(s.id),
       contextSeries: store.contextSeries(s.id),
       messages,
-      truncatedMessages: all.length - messages.length,
+      truncatedMessages: start,
+      truncatedAfter: all.length - start - messages.length,
+      decisions: decisions.map(decisionView),
       related: store.related(s.id, 12),
       subagents: store.subagents(s.id),
       resume: resume ? { ...resume, shell: commandText(resumeLaunch(resume), platform) } : null,
@@ -235,8 +293,10 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
 
     if (method === 'GET' && path.startsWith('/api/session/')) {
       const ref = decodeURIComponent(path.slice('/api/session/'.length));
+      const aroundParam = url.searchParams.get('around');
+      const around = aroundParam != null && /^\d{1,9}$/.test(aroundParam) ? Number(aroundParam) : undefined;
       try {
-        return send(res, 200, sessionDetail(ref));
+        return send(res, 200, sessionDetail(ref, around));
       } catch (err) {
         throw new HttpError(404, (err as Error).message);
       }
@@ -246,10 +306,70 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       const q = (url.searchParams.get('q') ?? '').slice(0, 500);
       const provider = url.searchParams.get('provider') ?? undefined;
       try {
-        return send(res, 200, { query: q, hits: store.search(q, { provider, limit: 200 }) });
+        const hits = store.search(q, { provider, limit: 200 });
+        const decisions = q.trim() ? allDecisions().filter((d) => decisionMatches(d, q) && (!provider || d.session?.provider === provider)) : [];
+        return send(res, 200, { query: q, hits, decisions: decisions.map(decisionView) });
       } catch (err) {
         throw new HttpError(400, (err as Error).message);
       }
+    }
+
+    // Every match inside one session, for "find in this conversation"
+    if (method === 'GET' && path === '/api/matches') {
+      const id = url.searchParams.get('id') ?? '';
+      const q = (url.searchParams.get('q') ?? '').slice(0, 500);
+      let s;
+      try {
+        s = store.resolve(id);
+      } catch (err) {
+        throw new HttpError(404, (err as Error).message);
+      }
+      try {
+        return send(res, 200, { query: q, matches: store.matchesIn(s.id, q) });
+      } catch (err) {
+        throw new HttpError(400, (err as Error).message);
+      }
+    }
+
+    if (method === 'GET' && path === '/api/decisions') {
+      return send(res, 200, { decisions: allDecisions().map(decisionView) });
+    }
+
+    if (method === 'POST' && path === '/api/decisions') {
+      const body = (await readBody(req)) as { sessionId?: unknown; seq?: unknown; text?: unknown } | null;
+      if (!body || typeof body.sessionId !== 'string' || typeof body.seq !== 'number' || typeof body.text !== 'string') {
+        throw new HttpError(400, 'Expected {"sessionId", "seq", "text"}.');
+      }
+      let created;
+      try {
+        created = addDecision(cfg.home, store, { sessionId: body.sessionId, seq: body.seq, text: body.text });
+      } catch (err) {
+        const msg = (err as Error).message;
+        throw new HttpError(/No session matches/.test(msg) ? 404 : 400, msg);
+      }
+      broadcast('decisions', { count: loadDecisions(cfg.home).decisions.length });
+      return send(res, 201, decisionView(resolveDecisions(store, [created])[0]!));
+    }
+
+    if ((method === 'PUT' || method === 'DELETE') && path.startsWith('/api/decisions/')) {
+      const id = decodeURIComponent(path.slice('/api/decisions/'.length));
+      if (!isDecisionId(id)) throw new HttpError(404, 'No such decision.');
+      if (method === 'DELETE') {
+        if (!deleteDecision(cfg.home, id)) throw new HttpError(404, 'No such decision.');
+        broadcast('decisions', { count: loadDecisions(cfg.home).decisions.length });
+        return send(res, 200, { ok: true });
+      }
+      const body = (await readBody(req)) as { text?: unknown } | null;
+      if (!body || typeof body.text !== 'string') throw new HttpError(400, 'Expected {"text"}.');
+      let updated;
+      try {
+        updated = updateDecision(cfg.home, id, body.text);
+      } catch (err) {
+        const msg = (err as Error).message;
+        throw new HttpError(/No such/.test(msg) ? 404 : 400, msg);
+      }
+      broadcast('decisions', { count: loadDecisions(cfg.home).decisions.length });
+      return send(res, 200, decisionView(resolveDecisions(store, [updated])[0]!));
     }
 
     if (method === 'GET' && path === '/api/layout') return send(res, 200, loadBoard(cfg.home));

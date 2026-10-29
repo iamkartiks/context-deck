@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ADAPTERS, getAdapter, type Adapter } from './adapters/index.js';
+import { decisionsForChain } from './decisions.js';
 import { ensureMarker, handoffMarker, HANDOFF_ID_RE, newHandoffId, parseHandoffMarker } from './handoff-marker.js';
 import { posixQuote, windowsSafeText, type Launch } from './platform.js';
 import type { ProviderId, SessionRow } from './schema.js';
@@ -32,7 +33,11 @@ export interface BriefOptions {
   checkIn?: boolean;
   /** Reuse an id (e.g. when rebuilding a preview); a new one is made otherwise. */
   handoffId?: string;
-  /** ContextDeck's folder, to read an earlier brief when a session started from a pointer prompt. */
+  /**
+   * ContextDeck's folder: used to read decisions you pinned (in this session
+   * and the ones it continued from), and an earlier brief when a session
+   * started from a pointer prompt.
+   */
   home?: string;
 }
 
@@ -55,6 +60,8 @@ export const MAX_EDITED_BRIEF_CHARS = 200_000;
 
 const LIMITS = {
   goal: 6_000,
+  decision: 600,
+  decisions: 20,
   instruction: 1_500,
   instructions: 12,
   reply: 2_500,
@@ -156,6 +163,16 @@ export function buildBrief(store: Store, ref: string, opts: BriefOptions): Brief
   const earlierText = first && earlier ? (isPointer(first.text) && opts.home ? readSavedBrief(opts.home, earlier.id) : null) ?? first.text : null;
   const goal = first ? (earlierText ? goalFromPreviousBrief(earlierText) ?? first.text : first.text) : from.title;
 
+  // Decisions you pinned, in this session and the ones it continued from. They
+  // are kept even when the brief has to shrink: they are the point of it.
+  const pinned = opts.home ? decisionsForChain(store, opts.home, from.id) : [];
+  const decisionLines = pinned.slice(-LIMITS.decisions).map((d) => {
+    const label = d.session ? getAdapter(d.session.provider)?.label : undefined;
+    const where = d.sessionId === from.id ? '' : label ? ` (decided earlier, in ${label})` : ' (decided in an earlier session)';
+    return `- ${clip(d.text, LIMITS.decision).replace(/\n/g, '\n  ')}${where}`;
+  });
+  if (pinned.length > LIMITS.decisions) decisionLines.unshift(`- (${pinned.length - LIMITS.decisions} earlier decisions not shown)`);
+
   const build = (instructionCount: number, replyCount: number, commandCount: number): string => {
     const later = users.slice(1);
     const shown = later.slice(-instructionCount);
@@ -185,7 +202,9 @@ export function buildBrief(store: Store, ref: string, opts: BriefOptions): Brief
 
     const steps = [
       '1. Check the current state of the code first: run `git status` and `git diff`. The files listed above may have uncommitted changes, and some work may have happened after this brief was written.',
-      "2. Don't redo work that's already done. If something above looks finished, verify it instead of rewriting it.",
+      decisionLines.length
+        ? "2. Don't redo work that's already done, and don't reopen the decisions above unless I ask. If something looks finished, verify it instead of rewriting it."
+        : "2. Don't redo work that's already done. If something above looks finished, verify it instead of rewriting it.",
       checkIn
         ? '3. Then reply with a short summary of where things stand and the next step you propose, and wait for my go-ahead before changing any files.'
         : '3. Then carry on with the next step.',
@@ -198,6 +217,7 @@ export function buildBrief(store: Store, ref: string, opts: BriefOptions): Brief
       section('Where things are', facts) +
       section('The goal', clip(goal, LIMITS.goal)) +
       section('Later instructions', instructions) +
+      section('Decisions already made', decisionLines) +
       section(`Where the previous session got to`, lastReplies.length ? lastReplies.join('\n\n---\n\n') : 'The session ended before replying.') +
       section('Files it changed', fileList) +
       section('What it ran most recently', commands) +

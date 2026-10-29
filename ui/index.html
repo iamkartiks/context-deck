@@ -32,6 +32,7 @@
         <span class="tabs-label" id="view-label">View</span>
         <button type="button" class="tab" data-view="canvas" aria-pressed="true">Canvas</button>
         <button type="button" class="tab" data-view="list" aria-pressed="false">List</button>
+        <button type="button" class="tab" data-view="decisions" aria-pressed="false" title="Messages you marked because they settled something">Decisions</button>
       </div>
       <div class="tabs" role="group" aria-labelledby="group-label">
         <span class="tabs-label" id="group-label">Group by</span>
@@ -91,6 +92,7 @@
     </section>
 
     <section id="list" class="list" hidden aria-label="Sessions"></section>
+    <section id="decisions" class="list decisions" hidden aria-label="Decisions"></section>
 
     <aside id="reader" class="reader" hidden aria-labelledby="reader-title" tabindex="-1"></aside>
 
