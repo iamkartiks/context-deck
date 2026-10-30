@@ -1,7 +1,7 @@
 import { basename, join, sep } from 'node:path';
 import { emptySession, type NormalizedSession, type ParseResult, type SessionRow } from '../schema.js';
 import { listFiles, readJsonl } from '../util/jsonl.js';
-import { asNumber, asString, clean, MAX_TOOL_CHARS, titleFrom, trackTime, truncate } from '../util/text.js';
+import { asNumber, asString, clean, MAX_TOOL_CHARS, noteEdit, titleFrom, trackTime, truncate } from '../util/text.js';
 import type { Adapter, ResumeCommand } from './types.js';
 
 /**
@@ -98,6 +98,7 @@ async function parse(filePath: string): Promise<ParseResult> {
   let firstCommand: string | null = null;
   let sessionIdField: string | null = null;
   const files = new Set<string>();
+  const editedAt = new Map<string, string>();
   const callNames = new Map<string, string>(); // functionCall id → tool name
   let seq = 0;
 
@@ -183,7 +184,10 @@ async function parse(filePath: string): Promise<ParseResult> {
         const args = call.args && typeof call.args === 'object' ? (call.args as Record<string, unknown>) : null;
         if (EDIT_TOOLS.has(name)) {
           const f = asString(args?.file_path) ?? asString(args?.absolute_path) ?? asString(args?.notebook_path);
-          if (f) files.add(f);
+          if (f) {
+            files.add(f);
+            noteEdit(editedAt, f, o.timestamp);
+          }
         }
         push('tool', clean(summariseCall(name, args), MAX_TOOL_CHARS), o.timestamp, name);
       }
@@ -203,6 +207,7 @@ async function parse(filePath: string): Promise<ParseResult> {
 
   if (!isSubagent && sessionIdField) s.nativeId = sessionIdField;
   s.filesTouched = [...files];
+  s.fileEditedAt = Object.fromEntries(editedAt);
   s.title = titleFrom(customTitle ?? firstPrompt ?? firstCommand ?? '') || '(untitled session)';
 
   if (s.messages.length === 0) return { session: null, badLines, warnings: [...warnings, 'no conversation found'] };

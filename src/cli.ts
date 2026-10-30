@@ -72,6 +72,10 @@ ${c.bold('Search by meaning')} (contextdeck semantic enable …)
       --drop              With disable: also delete stored vectors
       --words             With search: words only, skip meaning
 
+${c.bold('Decisions options')}
+      --changed         Only decisions whose files other sessions changed since
+      --all             Also list decisions that were replaced by newer ones
+
 ${c.bold('Handoff options')}
   -t, --to <tool>       Tool to continue in: codex (cx), claude-code (cc) or qwen-code (qw).
                         Default: Codex, or Claude Code when handing off from Codex
@@ -124,6 +128,7 @@ const OPTIONS = {
   drop: { type: 'boolean' },
   words: { type: 'boolean' },
   'min-score': { type: 'string' },
+  changed: { type: 'boolean' },
 } as const;
 
 type Values = ReturnType<typeof parseArgs<{ options: typeof OPTIONS; allowPositionals: true }>>['values'];
@@ -311,11 +316,32 @@ function cmdList(store: Store, v: Values): void {
   print(!!v.json, rows, () => sessionTable(rows));
 }
 
-function decisionLine(d: ResolvedDecision): string {
+function decisionLine(d: ResolvedDecision, store?: Store): string {
   const s = d.session;
-  const where = s ? `${c.bold(s.shortId)}  ${providerLabel(s.provider)}  ${s.project ?? '—'}  ${c.dim(ago(d.createdAt))}` : c.dim('(session no longer indexed)');
+  const where = s ? `${c.bold(s.shortId)}  ${providerLabel(s.provider)}  ${s.project ?? '—'}  ${c.dim(`decided ${ago(d.decidedAt)}`)}` : c.dim('(session no longer indexed)');
   const text = d.text.replace(/\n+/g, ' ');
-  return `${c.green('◆')} ${text}\n  ${where}${d.anchored ? '' : c.dim('  · message no longer found; your words are kept')}`;
+  const lines = [`${d.replacedBy ? c.dim('◇') : c.green('◆')} ${d.replacedBy ? c.dim(text) : text}`, `  ${where}${d.anchored ? '' : c.dim('  · message no longer found; your words are kept')}`];
+  if (d.replacedBy) lines.push(c.dim('  replaced by a newer decision'));
+  for (const ch of d.changes) {
+    const by = ch.sessions
+      .map((x) => {
+        try {
+          return `${store ? store.resolve(x.id).shortId : x.id} ${ago(x.editedAt)}`;
+        } catch {
+          return ago(x.editedAt);
+        }
+      })
+      .join(', ');
+    lines.push(`  ${c.yellow('!')} ${shortPath(ch.path, s?.cwd ?? null)} changed since (${by})`);
+  }
+  return lines.join('\n');
+}
+
+/** A path relative to the session's folder when it's inside it. */
+function shortPath(abs: string, cwd: string | null): string {
+  const a = abs.replace(/\\/g, '/');
+  const base = cwd?.replace(/\\/g, '/').replace(/\/+$/, '');
+  return base && a.startsWith(`${base}/`) ? a.slice(base.length + 1) : a;
 }
 
 function cmdDecisions(cfg: Config, store: Store, v: Values, args: string[]): void {
@@ -324,6 +350,8 @@ function cmdDecisions(cfg: Config, store: Store, v: Values, args: string[]): voi
   const provider = v.provider ? (adapterByPrefix(v.provider)?.id ?? v.provider) : null;
   const all = resolveDecisions(store, loadDecisions(cfg.home).decisions).filter(
     (d) =>
+      (v.all || !d.replacedBy) &&
+      (!v.changed || d.changes.length > 0) &&
       (!query || decisionMatches(d, query)) &&
       (!project || d.session?.project === project || d.session?.cwd === project) &&
       (!provider || d.session?.provider === provider),
@@ -335,12 +363,14 @@ function cmdDecisions(cfg: Config, store: Store, v: Values, args: string[]): voi
     () => {
       if (!rows.length) {
         return c.dim(
-          query || project || provider
+          query || project || provider || v.changed
             ? 'No decisions match.'
             : 'No decisions yet. In the canvas (`contextdeck ui`), open a session and choose “Mark as decision” on the message that settled something.',
         );
       }
-      return rows.map(decisionLine).join('\n\n');
+      const changed = rows.filter((d) => d.changes.length).length;
+      const note = changed && !v.changed ? `\n\n${c.dim(`${changed === 1 ? '1 decision' : `${changed} decisions`} may be out of date: other sessions changed files they cover. Check them, then choose "Still true" in the canvas.`)}` : '';
+      return rows.map((d) => decisionLine(d, store)).join('\n\n') + note;
     },
   );
 }
@@ -359,9 +389,9 @@ async function cmdSearch(cfg: Config, store: Store, v: Values, args: string[]): 
     .filter((h) => (!providerId || h.session.provider === providerId) && (!v.project || h.session.project === v.project || h.session.cwd === v.project))
     .slice(0, limit);
   // JSON output stays a plain list of hits; `contextdeck decisions <query> --json` covers decisions
-  const decisions = v.json ? [] : resolveDecisions(store, loadDecisions(cfg.home).decisions).filter((d) => decisionMatches(d, query));
+  const decisions = v.json ? [] : resolveDecisions(store, loadDecisions(cfg.home).decisions).filter((d) => !d.replacedBy && decisionMatches(d, query));
   print(!!v.json, hits, () => {
-    const head = decisions.length ? `${c.bold('Decisions')}\n${decisions.slice(0, 10).map(decisionLine).join('\n\n')}\n\n${c.bold('Messages')}\n` : '';
+    const head = decisions.length ? `${c.bold('Decisions')}\n${decisions.slice(0, 10).map((d) => decisionLine(d, store)).join('\n\n')}\n\n${c.bold('Messages')}\n` : '';
     if (hits.length === 0) return head + c.dim(`No messages match ${JSON.stringify(query)}.`);
     return head + hits
       .map((h) => {
@@ -411,7 +441,13 @@ function cmdShow(cfg: Config, store: Store, v: Values, args: string[]): void {
     const out = [c.bold(s.title), '', ...meta.map(([k, val]) => `${c.dim(k.padEnd(8))} ${val}`)];
     if (decisions.length) {
       out.push('', c.bold(`Decisions (${decisions.length})`));
-      out.push(...decisions.map((d) => `  ${c.green('◆')} ${d.text.replace(/\n+/g, ' ')}`));
+      out.push(
+        ...decisions.map((d) =>
+          d.replacedBy
+            ? c.dim(`  ◇ ${d.text.replace(/\n+/g, ' ')} (replaced)`)
+            : `  ${c.green('◆')} ${d.text.replace(/\n+/g, ' ')}${d.changes.length ? c.yellow('  ! files changed since') : ''}`,
+        ),
+      );
     }
     if (files.length) {
       out.push('', c.bold(`Files touched (${files.length})`));

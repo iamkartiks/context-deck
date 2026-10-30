@@ -5,7 +5,7 @@ import { after, before, describe, it } from 'node:test';
 import { loadConfig } from '../src/config.js';
 import { indexSources } from '../src/indexer.js';
 import { DatabaseSync } from 'node:sqlite';
-import { absoluteIn, downsampleSeries, Store, toFtsQuery } from '../src/store.js';
+import { absoluteIn, downsampleSeries, isUbiquitousFile, Store, toFtsQuery } from '../src/store.js';
 import { scratch } from './helpers.js';
 
 describe('downsampleSeries', () => {
@@ -110,6 +110,49 @@ describe('index upgrade', () => {
     } finally {
       s.cleanup();
     }
+  });
+});
+
+describe('file edit times', () => {
+  it('records when each session last edited each file, and fills them in on upgrade from v4', async () => {
+    const s = scratch();
+    try {
+      const cfg = loadConfig({ home: s.home, claudeDir: s.claude, codexDir: s.codex, qwenDir: s.qwen }, {});
+      let store = new Store(cfg.dbPath);
+      await indexSources(store, cfg.sources);
+      const session = '/Users/alice/code/acme-shop/src/auth/session.ts';
+      const times = (): Record<string, string> =>
+        Object.fromEntries(
+          store
+            .editsTo([session])
+            .map((e): [string, string] => [store.resolve(e.sessionId).shortId, e.editedAt])
+            .sort(),
+        );
+      const expected = times();
+      assert.deepEqual(Object.keys(expected), ['cc:0f3a1b11', 'cx:d5e6f701', 'qw:3c4d5e61'], 'Claude Code, Codex and Qwen Code each edited it');
+      for (const t of Object.values(expected)) assert.ok(!Number.isNaN(Date.parse(t)));
+      assert.ok(Date.parse(expected['cc:0f3a1b11']!) < Date.parse(expected['cx:d5e6f701']!));
+      assert.equal(store.editsTo([]).length, 0);
+      store.close();
+
+      // Turn it back into a v4 index without the column
+      const db = new DatabaseSync(cfg.dbPath);
+      db.exec(`ALTER TABLE session_files DROP COLUMN edited_at; UPDATE meta SET value = '4' WHERE key = 'schema_version';`);
+      db.close();
+      store = new Store(cfg.dbPath);
+      assert.equal(store.stats().sessions, 0, 'cache cleared so every file is re-read');
+      await indexSources(store, cfg.sources);
+      assert.deepEqual(times(), expected);
+      store.close();
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  it('leaves lockfiles and manifests out of the files a session is about', () => {
+    assert.equal(isUbiquitousFile('/x/package-lock.json'), true);
+    assert.equal(isUbiquitousFile('C:\\x\\Cargo.lock'), true);
+    assert.equal(isUbiquitousFile('/x/src/session.ts'), false);
   });
 });
 

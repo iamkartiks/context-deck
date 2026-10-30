@@ -59,6 +59,14 @@ export function trackTime(s: { startedAt: string | null; updatedAt: string | nul
   if (!s.updatedAt || t > s.updatedAt) s.updatedAt = t;
 }
 
+/** Remember the latest time a file was edited (ISO timestamps; anything unparseable is skipped). */
+export function noteEdit(editedAt: Map<string, string>, file: string, ts: unknown): void {
+  const t = asString(ts);
+  if (!t || Number.isNaN(Date.parse(t))) return;
+  const prev = editedAt.get(file);
+  if (!prev || Date.parse(t) > Date.parse(prev)) editedAt.set(file, t);
+}
+
 /**
  * Files named in an apply_patch-style patch ("*** Update File: src/a.ts").
  * Used by Codex, and by any agent that edits through unified patches.

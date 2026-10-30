@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
-import { addDecision } from '../src/decisions.js';
+import { addDecision, loadDecisions } from '../src/decisions.js';
 import { Store } from '../src/store.js';
 import { REPO, scratch } from './helpers.js';
 
@@ -110,6 +110,28 @@ describe('cli', () => {
     assert.match(run('search', 'httponly').out, /^Decisions\n◆ Use httpOnly session cookies/);
     assert.ok(Array.isArray(JSON.parse(run('search', 'httponly', '--json').out)), 'search --json stays a list of hits');
     assert.match(run('show', 'cc:0f3a1b11').out, /Decisions \(1\)\n  ◆ Use httpOnly session cookies/);
+
+    // Files it covers changed later, in Codex and Qwen Code
+    assert.match(list.out, /decided .+\n  ! src\/auth\/session\.ts changed since \(qw:3c4d5e61 .+, cx:d5e6f701 .+\)/);
+    assert.match(list.out, /1 decision may be out of date/);
+    assert.match(run('decisions', '--changed').out, /Use httpOnly session cookies/);
+    assert.equal(json[0].changes[0].path, '/Users/alice/code/acme-shop/src/auth/session.ts');
+    assert.match(json[0].decidedAt, /^2026-10-26T/);
+  });
+
+  it('hides replaced decisions unless asked', () => {
+    const store = new Store(join(s.home, 'index.db'));
+    try {
+      const [old] = loadDecisions(s.home).decisions;
+      addDecision(s.home, store, { sessionId: store.resolve('qw:3c4d5e61').id, seq: 0, text: 'Cookies, rotated hourly', replaces: old!.id });
+    } finally {
+      store.close();
+    }
+    const list = run('decisions').out;
+    assert.match(list, /Cookies, rotated hourly/);
+    assert.doesNotMatch(list, /Use httpOnly session cookies/);
+    assert.match(run('decisions', '--all').out, /◇ Use httpOnly session cookies[\s\S]*replaced by a newer decision/);
+    assert.doesNotMatch(run('search', 'httponly').out, /^Decisions/, 'search leaves replaced ones out');
   });
 
   it('uses exit code 2 for usage errors and 1 for failures', () => {

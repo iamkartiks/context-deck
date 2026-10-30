@@ -512,11 +512,49 @@ describe('ui server: finding things and decisions', () => {
     assert.deepEqual((await call(server.port, '/api/decisions')).json().decisions, []);
   });
 
+  it('flags changed files, takes "still true", and replaces and restores decisions', async () => {
+    const seq = store.matchesIn(store.resolve('cc:0f3a1b11').id, 'httpOnly')[0]!.seq;
+    const post = (b: unknown) => call(server.port, '/api/decisions', { method: 'POST', body: b, headers: auth() });
+    const put = (id: string, b: unknown) => call(server.port, `/api/decisions/${id}`, { method: 'PUT', body: b, headers: auth() });
+    const old = (await post({ sessionId: 'cc:0f3a1b11', seq, text: 'Use httpOnly cookies' })).json();
+    assert.match(old.decidedAt, /^2026-10-26T/);
+    assert.equal(old.replacedBy, null);
+    assert.deepEqual(old.changes.map((c: { path: string }) => c.path), ['/Users/alice/code/acme-shop/src/auth/session.ts']);
+    assert.deepEqual(
+      old.changes[0].sessions.map((x: { session: { shortId: string } }) => x.session.shortId),
+      ['qw:3c4d5e61', 'cx:d5e6f701'],
+    );
+
+    const ok = await put(old.id, { stillTrue: true });
+    assert.equal(ok.status, 200, ok.body);
+    assert.deepEqual(ok.json().changes, []);
+    assert.ok(ok.json().checkedAt);
+
+    assert.equal((await post({ sessionId: 'qw:3c4d5e61', seq: 0, text: 'x', replaces: '../x' })).status, 400);
+    assert.equal((await post({ sessionId: 'qw:3c4d5e61', seq: 0, text: 'x', replaces: 'd_ffffffffff' })).status, 400);
+    const next = await post({ sessionId: 'qw:3c4d5e61', seq: 0, text: 'Cookies, rotated hourly', replaces: old.id });
+    assert.equal(next.status, 201, next.body);
+    const all = (await call(server.port, '/api/decisions')).json().decisions;
+    const before = all.find((x: { id: string }) => x.id === old.id);
+    assert.deepEqual(before.replacedBy, { id: next.json().id, text: 'Cookies, rotated hourly', sessionId: 'qwen-code:5d2c8e41-7a3b-4c6d-9e0f-1a2b3c4d5e61' });
+    const counts = (await call(server.port, '/api/board')).json().decisionCounts;
+    assert.equal(counts['claude-code:7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11'], undefined, 'replaced ones are not counted on cards');
+
+    const back = await put(old.id, { restore: true });
+    assert.equal(back.status, 200);
+    assert.equal(back.json().replacedBy, null);
+    assert.equal((await put('d_ffffffffff', { stillTrue: true })).status, 404);
+    assert.equal((await put(old.id, { stillTrue: 'yes' })).status, 400);
+    for (const x of (await call(server.port, '/api/decisions')).json().decisions) {
+      await call(server.port, `/api/decisions/${x.id}`, { method: 'DELETE', headers: auth() });
+    }
+  });
+
   it('puts decisions in the handoff preview', async () => {
     const seq = store.matchesIn(store.resolve('cc:0f3a1b11').id, 'httpOnly')[0]!.seq;
     await call(server.port, '/api/decisions', { method: 'POST', body: { sessionId: 'cc:0f3a1b11', seq, text: 'Keep the header path for mobile' }, headers: auth() });
     const p = (await call(server.port, '/api/handoff/preview?id=cc%3A0f3a1b11&to=codex')).json();
-    assert.match(p.brief, /## Decisions already made\n\n- Keep the header path for mobile\n/);
+    assert.match(p.brief, /## Decisions already made\n\n- Keep the header path for mobile \(decided 2026-10-26\)\n/);
   });
 });
 
