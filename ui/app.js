@@ -948,9 +948,17 @@ function renderDecisions() {
   } else if (!shown.length) {
     inner.append(h('div', { class: 'empty interactive' }, h('h2', {}, 'No decisions match'), h('p', {}, 'Try another word, or turn a tool back on.')));
   } else {
-    // Group by project, newest decision first
+    const toCheck = shown.filter((d) => !d.replacedBy && d.changes?.length).length;
+    if (toCheck) {
+      inner.append(
+        h('p', { class: 'note d-check-note' }, `${plural(toCheck, 'decision')} may be out of date: other sessions changed files ${toCheck === 1 ? 'it covers' : 'they cover'}. Check ${toCheck === 1 ? 'it' : 'them'} below.`),
+      );
+    }
+    // Group by project: decisions to check first, then the rest newest first, replaced ones last
+    const rank = (d) => (d.replacedBy ? 2 : d.changes?.length ? 0 : 1);
+    const ordered = [...shown].sort((a, b) => rank(a) - rank(b) || (b.decidedAt ?? b.createdAt).localeCompare(a.decidedAt ?? a.createdAt));
     const groups = new Map();
-    for (const d of shown) {
+    for (const d of ordered) {
       const key = d.session?.project ?? 'No project';
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(d);
@@ -960,7 +968,7 @@ function renderDecisions() {
         h(
           'section',
           { class: 'list-group' },
-          h('div', { class: 'list-head' }, h('h2', {}, project), h('span', { class: 'meta' }, plural(items.length, 'decision'))),
+          h('div', { class: 'list-head' }, h('h2', {}, project), h('span', { class: 'meta' }, plural(items.filter((d) => !d.replacedBy).length, 'decision'))),
           h('ul', { class: 'decision-grid' }, items.map((d) => h('li', {}, decisionCard(d)))),
         ),
       );
@@ -1355,6 +1363,7 @@ function openDecideForm(msgEl, m, body) {
   for (const f of els.reader.querySelectorAll('.decide-form')) f.remove();
   const ta = h('textarea', { class: 'decide-text', rows: 3, maxlength: 2000, 'aria-label': 'The decision' });
   ta.value = quote || firstWords(m.text);
+  const replaces = replacesPicker(state.detail.session);
   const cancel = () => {
     form.remove();
     $('.mark-btn', msgEl)?.focus();
@@ -1374,9 +1383,11 @@ function openDecideForm(msgEl, m, body) {
         }
         save.disabled = true;
         try {
-          const created = await api('/api/decisions', { method: 'POST', body: { sessionId: state.detail.session.id, seq: m.seq, text } });
+          const old = replaces.select.value || null;
+          const created = await api('/api/decisions', { method: 'POST', body: { sessionId: state.detail.session.id, seq: m.seq, text, replaces: old } });
           afterDecisionChange({ added: created });
-          toast('Marked as a decision.');
+          if (old) state.decisions = null; // the old one changed too; the Decisions view reloads it
+          toast(old ? 'Marked as a decision. The old one is marked replaced.' : 'Marked as a decision.');
         } catch (err) {
           save.disabled = false;
           toast(err.message);
@@ -1402,11 +1413,93 @@ function openDecideForm(msgEl, m, body) {
         ? 'Quoted from your selection. Edit it so it reads well on its own.'
         : 'Write it the way you’d want to find it later, e.g. “Use Postgres: SQLite can’t take concurrent writes.” Tip: select part of a message first to quote just that.',
     ),
+    replaces.el,
     h('div', { class: 'actions' }, save, h('button', { type: 'button', class: 'text-button', onclick: cancel }, 'Cancel')),
   );
   msgEl.after(form);
   ta.focus();
   ta.select();
+}
+
+/**
+ * "Replaces an earlier decision": a select listing current decisions, this
+ * project's first. Hidden until there is something to choose from.
+ */
+function replacesPicker(session) {
+  const select = h('select', { id: 'decide-replaces', class: 'decide-replaces' }, h('option', { value: '' }, 'Nothing, it’s a new decision'));
+  const el = h('label', { class: 'decide-replaces-row', hidden: true }, h('span', { class: 'label' }, 'Replaces'), select);
+  const fill = (list) => {
+    const current = list.filter((d) => !d.replacedBy);
+    if (!current.length) return;
+    const here = (d) => (d.session?.project && d.session.project === session.project ? 0 : 1);
+    current.sort((a, b) => here(a) - here(b) || (b.decidedAt ?? b.createdAt).localeCompare(a.decidedAt ?? a.createdAt));
+    for (const d of current.slice(0, 60)) {
+      const where = [d.session ? toolLabel(d.session.provider) : null, d.session?.project, agoLong(d.decidedAt ?? d.createdAt)].filter(Boolean).join(' · ');
+      select.append(h('option', { value: d.id }, `${shortTitle(d.text, 80)} (${where})`));
+    }
+    el.hidden = false;
+  };
+  if (state.decisions) fill(state.decisions);
+  else
+    api('/api/decisions')
+      .then((r) => {
+        state.decisions = r.decisions;
+        fill(r.decisions);
+      })
+      .catch(() => {});
+  return { el, select };
+}
+
+/** A file path as you'd say it: relative to the decision's project folder when it's inside it. */
+function projectPath(abs, cwd) {
+  const a = abs.replace(/\\/g, '/');
+  const base = cwd?.replace(/\\/g, '/').replace(/\/+$/, '');
+  return base && a.startsWith(`${base}/`) ? a.slice(base.length + 1) : a;
+}
+
+/** Ask the server to change one thing about a decision, then refresh what shows it. */
+async function patchDecision(x, body, done) {
+  try {
+    const updated = await api(`/api/decisions/${encodeURIComponent(x.id)}`, { method: 'PUT', body });
+    afterDecisionChange({ updated });
+    if (done) toast(done);
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+/** "Files changed since": which files, in which sessions, and the two ways to settle it. */
+function changedCallout(x) {
+  const rows = x.changes.slice(0, 3).map((c) => {
+    const by = c.sessions[0];
+    return h(
+      'li',
+      {},
+      h('code', { title: c.path }, projectPath(c.path, x.session?.cwd)),
+      by
+        ? h(
+            'button',
+            { type: 'button', class: 'text-button d-by', title: `Open “${by.session.title}”`, onclick: () => select(by.session.id) },
+            swatch(by.session.provider),
+            ` ${toolLabel(by.session.provider)}, ${agoLong(by.editedAt)}`,
+            c.sessions.length > 1 ? ` (+${c.sessions.length - 1})` : '',
+          )
+        : null,
+    );
+  });
+  return h(
+    'div',
+    { class: 'd-changed', role: 'note' },
+    h('p', { class: 'd-changed-head' }, 'Files it covers changed since, in sessions that didn’t have this decision. Does it still hold?'),
+    h('ul', {}, rows),
+    x.changes.length > 3 ? h('p', { class: 'note' }, `…and ${x.changes.length - 3} more files`) : null,
+    h(
+      'div',
+      { class: 'd-actions' },
+      h('button', { type: 'button', class: 'pill outline small', onclick: () => patchDecision(x, { stillTrue: true }, 'Marked as still true.') }, 'Still true'),
+      h('span', { class: 'note' }, 'If not, mark the new decision and choose this one under “Replaces”.'),
+    ),
+  );
 }
 
 function editDecision(card, textEl, x) {
@@ -1481,11 +1574,15 @@ function removeButton(x) {
 function decisionCard(x, { inReader = false } = {}) {
   const textEl = h('p', { class: 'd-text' }, x.text);
   const open = () => select(x.sessionId, { seq: x.seq });
+  const decided = x.decidedAt ?? x.createdAt;
+  const replaced = !!x.replacedBy;
   const card = h(
     'div',
-    { class: 'decision', dataset: { tool: x.session?.provider ?? '' } },
-    h('div', { class: 'd-top' }, flag(), h('span', { class: 'd-when', title: fullDate(x.createdAt) }, `Decided ${agoLong(x.createdAt)}`)),
+    { class: `decision${replaced ? ' replaced' : ''}${x.changes?.length ? ' changed' : ''}`, dataset: { tool: x.session?.provider ?? '' } },
+    h('div', { class: 'd-top' }, flag(), h('span', { class: 'd-when', title: fullDate(decided) }, `${replaced ? 'Replaced · decided' : 'Decided'} ${agoLong(decided)}`)),
     textEl,
+    replaced ? h('p', { class: 'd-replaced-by' }, h('span', { class: 'label' }, 'Now'), ' ', x.replacedBy.text) : null,
+    !replaced && x.changes?.length ? changedCallout(x) : null,
     !inReader && x.session
       ? h('div', { class: 'd-session' }, swatch(x.session.provider), h('span', { class: 'd-tool' }, toolLabel(x.session.provider)), h('span', { class: 'd-title', title: x.session.title }, x.session.title))
       : null,
@@ -1504,7 +1601,9 @@ function decisionCard(x, { inReader = false } = {}) {
               'Open',
             )
           : null,
-      h('button', { type: 'button', class: 'text-button', onclick: () => editDecision(card, textEl, x) }, 'Edit'),
+      replaced
+        ? h('button', { type: 'button', class: 'text-button', onclick: () => patchDecision(x, { restore: true }, 'Restored: it’s current again.') }, 'Restore')
+        : h('button', { type: 'button', class: 'text-button', onclick: () => editDecision(card, textEl, x) }, 'Edit'),
       removeButton(x),
     ),
   );
@@ -1517,7 +1616,7 @@ function afterDecisionChange({ added, updated, removed }) {
   const sid = changed.sessionId;
   const counts = (state.board.decisionCounts ??= {});
   if (added) counts[sid] = (counts[sid] ?? 0) + 1;
-  if (removed) counts[sid] = Math.max(0, (counts[sid] ?? 1) - 1);
+  if (removed && !removed.replacedBy) counts[sid] = Math.max(0, (counts[sid] ?? 1) - 1);
   const merge = (list) => {
     const rest = list.filter((d) => d.id !== changed.id);
     return removed ? rest : [...rest, { ...(list.find((d) => d.id === changed.id) ?? {}), ...changed }];

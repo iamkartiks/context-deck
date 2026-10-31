@@ -38,7 +38,7 @@ One SQLite file, opened with Node's built-in `node:sqlite` (no native build step
 | `sessions` | One row per session, with the counters from the schema. `id` is `<provider>:<nativeId>`. |
 | `messages` | The cleaned text of each message, in order. |
 | `messages_fts` | FTS5 index over `messages.text` (rowid = `messages.id`), Porter-stemmed. |
-| `session_files` | Files each session edited, plus an absolute path resolved against the session's cwd. Powers `related`. |
+| `session_files` | Files each session edited, an absolute path resolved against the session's cwd, and when the session last edited it (if recorded). Powers `related` and the "files changed since" check on decisions. |
 
 Re-indexing one file deletes and re-inserts that session's rows inside a transaction, so readers never see half a session.
 
@@ -87,7 +87,12 @@ The CLI (`src/cli.ts`) is a thin layer over the store. Every command supports `-
 
 A decision is a message you marked because it settled something, in your own words. Like the canvas layout, decisions are things you made, so they live in `~/.contextdeck/decisions.json` (written atomically, mode 0600), never in `index.db`.
 
-Each one stores the session id, the message's position (`seq`) and a sha256 fingerprint of the message text. `resolveDecisions()` checks the message at that position; if a re-index moved it, it finds the message again by fingerprint; if it's gone, the decision is shown as "no longer in the session" with your words intact. `decisionsForChain()` follows `handoff_from` links back from a session so briefs carry decisions from earlier sessions too.
+Each one stores the session id, the message's position (`seq`) and a sha256 fingerprint of the message text. `resolveDecisions()` checks the message at that position; if a re-index moved it, it finds the message again by fingerprint; if it's gone, the decision is shown as "no longer in the session" with your words intact. `decisionsForChain()` follows `handoff_from` links back from a session so briefs carry decisions from earlier sessions too, swapping any that were replaced for what replaced them.
+
+A decision can go stale. `resolveDecisions()` reports two signals, and neither claims to know whether it still holds:
+
+- **Replaced:** `replacedBy` points at the newer decision you said replaces it. Replaced decisions stay in the file and the Decisions view, but leave briefs and card counts. Removing the replacement clears the link.
+- **Files changed since:** adapters record when each file was last edited (`fileEditedAt`, stored as `session_files.edited_at`). A decision covers the files its session edited, minus lockfiles and manifests. It's flagged when one of them was edited after it was decided (the message's time) or last confirmed (`checkedAt`, set by "Still true"), by a session outside its handoff family: the session itself, its subagents, and sessions that continued it, which all had the decision in front of them. At most 5 files and 3 sessions per file are reported.
 
 ### Search by meaning (`src/semantic.ts`, `src/embedder.ts`, `src/meaning.ts`)
 
@@ -115,7 +120,7 @@ Off unless turned on (`~/.contextdeck/config.json`); while off, no code path tal
 | `GET` / `PUT /api/semantic` | Search by meaning: status and progress; turn on (after checking the model answers; local addresses only) or off (`drop` deletes vectors) |
 | `GET /api/matches?id=&q=` | Every matching message in one session, in order, for "find in this conversation" |
 | `GET /api/decisions` | Every decision, with where it is now and a summary of its session |
-| `POST /api/decisions` · `PUT` / `DELETE /api/decisions/:id` | Mark, edit and remove decisions (stored in `decisions.json`) |
+| `POST /api/decisions` · `PUT` / `DELETE /api/decisions/:id` | Mark (optionally `replaces` an earlier one), edit (`{text}`, `{stillTrue: true}` or `{restore: true}`) and remove decisions (stored in `decisions.json`) |
 | `GET /api/events` | Server-sent events; `index` fires whenever the watcher re-indexes, `decisions` when decisions change, `semantic` with search-by-meaning progress |
 | `GET` / `PUT /api/layout` | Hand-placed card positions, stored in `board.json` (not in the index, so rebuilding the index never loses them) |
 | `POST /api/reindex` | Rescan now |

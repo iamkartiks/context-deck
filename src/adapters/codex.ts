@@ -7,6 +7,7 @@ import {
   clean,
   filesFromPatch,
   MAX_TOOL_CHARS,
+  noteEdit,
   textFromContent,
   titleFrom,
   trackTime,
@@ -74,6 +75,7 @@ async function parse(filePath: string): Promise<ParseResult> {
   let badLines = 0;
   const warnings: string[] = [];
   const files = new Set<string>();
+  const editedAt = new Map<string, string>();
   const callNames = new Map<string, string>(); // call_id → tool name
   // Codex logs user/assistant text twice (response_item and event_msg). Keep both
   // streams and use event_msg only if a file has no response_item messages.
@@ -126,7 +128,10 @@ async function parse(filePath: string): Promise<ParseResult> {
         const args = parseArgs(p.arguments) ?? (p.action as Record<string, unknown> | undefined) ?? null;
         const rawInput = typeof p.input === 'string' ? p.input : typeof p.arguments === 'string' ? p.arguments : '';
         const cmd = commandText(args?.command);
-        for (const f of filesFromPatch(rawInput + '\n' + (cmd ?? ''))) files.add(f);
+        for (const f of filesFromPatch(rawInput + '\n' + (cmd ?? ''))) {
+          files.add(f);
+          noteEdit(editedAt, f, ts);
+        }
         const summary = cmd ? `${name}: $ ${cmd}` : `${name}: ${rawInput || JSON.stringify(args ?? {})}`;
         add(items, 'tool', clean(summary, MAX_TOOL_CHARS), ts, name);
         return;
@@ -259,6 +264,7 @@ async function parse(filePath: string): Promise<ParseResult> {
   }
   s.messages.forEach((m, i) => (m.seq = i));
   s.filesTouched = [...files];
+  s.fileEditedAt = Object.fromEntries(editedAt);
   s.title = titleFrom(threadName ?? firstItemPrompt ?? firstEventPrompt ?? '') || '(untitled session)';
 
   if (s.messages.length === 0) return { session: null, badLines, warnings: [...warnings, 'no conversation found'] };

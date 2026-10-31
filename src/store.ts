@@ -12,7 +12,7 @@ import type { ContextSeries, NormalizedSession, ProviderId, SessionRow } from '.
  * from the providers' own session files, which are never modified.
  */
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const PAGE_SIZE = 16384;
 
 /** Longest context series kept per session; longer ones are downsampled. */
@@ -104,6 +104,8 @@ CREATE TABLE IF NOT EXISTS session_files (
   session_id  TEXT NOT NULL,
   path        TEXT NOT NULL,
   abs_path    TEXT NOT NULL,
+  -- When the session last edited it, if the session recorded times
+  edited_at   TEXT,
   PRIMARY KEY (session_id, path)
 );
 CREATE INDEX IF NOT EXISTS session_files_abs ON session_files(abs_path);
@@ -301,13 +303,16 @@ export class Store {
     }
     if (current > 0 && current < SCHEMA_VERSION) {
       // v2 added the context-over-time series, v3 the handoff link, v4 the
-      // smaller search index and incremental vacuum. The index is a cache, so
+      // smaller search index and incremental vacuum, v5 when each file was
+      // last edited (for decisions whose files changed). The index is a cache, so
       // the simplest correct upgrade is to fix up the tables, empty them, and
       // re-read every file.
       const cols = new Set((this.db.prepare(`PRAGMA table_info(sessions)`).all() as Row[]).map((c) => String(c.name)));
       for (const col of ['context_series', 'handoff_id', 'handoff_from']) {
         if (!cols.has(col)) this.db.exec(`ALTER TABLE sessions ADD COLUMN ${col} TEXT`);
       }
+      const fileCols = new Set((this.db.prepare(`PRAGMA table_info(session_files)`).all() as Row[]).map((c) => String(c.name)));
+      if (!fileCols.has('edited_at')) this.db.exec(`ALTER TABLE session_files ADD COLUMN edited_at TEXT`);
       this.db.exec(`DROP TABLE IF EXISTS messages_fts`);
       this.db.exec(FTS_TABLE);
       this.db.exec(`DELETE FROM messages; DELETE FROM session_files; DELETE FROM sessions; DELETE FROM files;`);
@@ -505,9 +510,9 @@ export class Store {
       }
 
       const insFile = this.db.prepare(
-        `INSERT OR IGNORE INTO session_files(session_id, path, abs_path) VALUES (?, ?, ?)`,
+        `INSERT OR IGNORE INTO session_files(session_id, path, abs_path, edited_at) VALUES (?, ?, ?, ?)`,
       );
-      for (const f of s.filesTouched) insFile.run(id, f, absoluteIn(s.cwd, f));
+      for (const f of s.filesTouched) insFile.run(id, f, absoluteIn(s.cwd, f), s.fileEditedAt?.[f] ?? null);
 
       this.upsertFile(path, s.provider, size, mtimeMs, id, badLines, null);
     });
@@ -597,6 +602,54 @@ export class Store {
     } catch {
       return null;
     }
+  }
+
+  /** Files a session edited, as absolute paths, leaving out lockfiles and other files every task touches. */
+  editedFiles(sessionId: string): string[] {
+    return (this.db.prepare(`SELECT DISTINCT abs_path FROM session_files WHERE session_id = ? ORDER BY abs_path`).all(sessionId) as Row[])
+      .map((r) => String(r.abs_path))
+      .filter((p) => !isUbiquitousFile(p));
+  }
+
+  /** Every recorded edit to these files (absolute paths): which session, and when it last edited each. */
+  editsTo(absPaths: string[]): { sessionId: string; absPath: string; editedAt: string }[] {
+    if (!absPaths.length) return [];
+    const out: { sessionId: string; absPath: string; editedAt: string }[] = [];
+    // Bounded batches keep the statement under SQLite's parameter limit
+    for (let i = 0; i < absPaths.length; i += 200) {
+      const batch = absPaths.slice(i, i + 200);
+      const rows = this.db
+        .prepare(
+          `SELECT session_id, abs_path, MAX(edited_at) AS edited_at FROM session_files
+           WHERE edited_at IS NOT NULL AND abs_path IN (${batch.map(() => '?').join(',')})
+           GROUP BY session_id, abs_path`,
+        )
+        .all(...batch) as Row[];
+      for (const r of rows) out.push({ sessionId: String(r.session_id), absPath: String(r.abs_path), editedAt: String(r.edited_at) });
+    }
+    return out;
+  }
+
+  /**
+   * A session and everything that carried its context: its subagents, the
+   * sessions that continued it through handoffs, and theirs. They all saw its
+   * decisions, so their edits don't put a decision in doubt.
+   */
+  handoffFamily(sessionId: string, max = 200): Set<string> {
+    const seen = new Set<string>([sessionId]);
+    const queue = [sessionId];
+    const next = this.db.prepare(`SELECT id FROM sessions WHERE handoff_from = ? OR parent_id = ?`);
+    while (queue.length && seen.size < max) {
+      const id = queue.shift()!;
+      for (const r of next.all(id, id) as Row[]) {
+        const child = String(r.id);
+        if (!seen.has(child)) {
+          seen.add(child);
+          queue.push(child);
+        }
+      }
+    }
+    return seen;
   }
 
   filesTouched(sessionId: string): string[] {
@@ -1068,6 +1121,11 @@ export class Store {
     for (const w of workstreams) for (const id of w.sessionIds) sessionWorkstream[id] = w.id;
     return { workstreams, edges, sessionWorkstream };
   }
+}
+
+/** Lockfiles, manifests and docs that nearly every task touches: they don't say what the work was about. */
+export function isUbiquitousFile(absPath: string): boolean {
+  return UBIQUITOUS_FILES.has(basename(absPath.replace(/\\/g, '/')));
 }
 
 /** A file shared by more sessions than this is too common to signal shared work. */

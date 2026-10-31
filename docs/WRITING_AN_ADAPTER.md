@@ -82,6 +82,7 @@ The helpers do the important safety work for you:
 | `titleFrom(text)` | First meaningful line, redacted, ≤100 chars. |
 | `trackTime(s, ts)` | Keeps `startedAt`/`updatedAt` as the min/max timestamps. |
 | `filesFromPatch(text)` | Files named in `*** Update File:` style patches. |
+| `noteEdit(map, file, ts)` | Remembers when each edited file was last changed. Put the map in `s.fileEditedAt` (`Object.fromEntries(map)`) so decisions can tell when their files changed. Optional, but worth it if the tool records times. |
 | `textFromContent(content)` | Text from a string or an array of `{type, text}` blocks. |
 
 ## 3. Register it

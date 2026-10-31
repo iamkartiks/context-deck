@@ -85,7 +85,7 @@ contextdeck ui      # indexes, then opens the canvas in your browser
 | **Resume** | **Copy command**, or **Open in Terminal**, which runs it in a new terminal window in the right folder (see [Windows, macOS and Linux](#windows-macos-and-linux)). |
 | **Hand off** | **Continue in…** another tool, or start a **fresh session** in the same one, from a brief you can edit. See [Handoff](#handoff). |
 | **List view** | Every session in rows, grouped the same way as the canvas. Handy on small screens. |
-| **Decisions view** | Every decision you marked, by project, newest first. Search filters them too. |
+| **Decisions view** | Every decision you marked, by project: ones to check first, then newest first, replaced ones last. Search filters them too. |
 
 Options: `--port <n>`, `--no-open`. The page loads nothing from the internet (fonts are bundled) and only this computer can reach it; see [SECURITY.md](SECURITY.md) for how it's locked down.
 
@@ -99,7 +99,7 @@ Claude Code doesn't record how big its context window is, so its fill level is a
 | `index [--full]` | Scan session files into the index. Incremental: only changed files are re-read. |
 | `list` | Recent sessions across every tool. `--all` includes subagents. |
 | `search <query>` | Full-text search. Words are ANDed; `"exact phrase"`, `prefix*` and `OR` work. Matching decisions are listed first. |
-| `decisions [query]` | Decisions you marked, across every tool. `--project`, `-p` and `--json` work here too. |
+| `decisions [query]` | Decisions you marked, across every tool, with any whose files changed since. `--changed` shows only those, `--all` adds replaced ones. `--project`, `-p` and `--json` work here too. |
 | `semantic [status\|enable\|disable]` | [Search by meaning](#search-by-meaning-optional) with a local embedding model. Off until you enable it. |
 | `show <id>` | Metadata, decisions, files touched, context usage, last messages and the resume command. `--all` adds tool calls, `-m 30` shows more. |
 | `resume <id> [--run]` | Print, or run, the command that reopens the session in its own tool and folder. |
@@ -137,7 +137,12 @@ Long sessions bury the moment something got settled: "use Postgres", "keep the o
 - the session's card shows a flag with the count, and the side panel lists its decisions at the top, each a click away from the message it came from;
 - the **Decisions** view lists every decision across tools and projects;
 - search finds decisions as well as messages, and a matching decision is what the card shows;
-- every handoff brief includes the decisions from that session *and* the sessions it continued from, under "Decisions already made", with an instruction not to reopen them unless you ask.
+- every handoff brief includes the decisions from that session *and* the sessions it continued from, under "Decisions already made", each with the date it was made, and an instruction not to reopen them unless you ask but to check them against the code.
+
+**When a decision stops being true.** Code moves on, and a decision that was right last month can quietly stop holding. ContextDeck can't know whether it still holds, but it notices two things:
+
+- **Its files changed.** A decision covers the files its session edited. If a later session that never had the decision (any tool, not one it was handed to) edits one of them, the decision is flagged: the Decisions view lists it first, shows which file and which session, and the next handoff brief says so. Choose **Still true** to clear it until the files change again. Lockfiles and manifests like `package.json` don't count.
+- **You replaced it.** When you mark a new decision, choose the old one under **Replaces**. The old one stays in the Decisions view, struck through with what replaced it, and briefs carry the new one instead. **Restore** undoes it, and removing the new decision brings the old one back.
 
 Decisions are yours, so they're kept in `~/.contextdeck/decisions.json` (readable only by you), not in the index: rebuilding the index never loses them. If a session file changes and the message moves, it's found again; if it's gone, your words are kept.
 

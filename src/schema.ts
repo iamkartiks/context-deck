@@ -53,6 +53,12 @@ export interface NormalizedSession {
   compactionPoints: number[];
   /** Files the agent created, edited or deleted (as written in the session). */
   filesTouched: string[];
+  /**
+   * When each of filesTouched was last edited (ISO-8601), for the files where
+   * the session records it. Optional: used to notice when a decision's files
+   * change later.
+   */
+  fileEditedAt?: Record<string, string>;
   /** For subagent sessions: the native id of the parent session. */
   parentNativeId: string | null;
   isSubagent: boolean;

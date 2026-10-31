@@ -6,6 +6,15 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ### Added
 
+- **Decisions that may be out of date are flagged.** If a later session that never had a decision (in any tool) edits the files it covers, the Decisions view lists it first with the file and the session, `contextdeck decisions` marks it, and handoff briefs say so. **Still true** clears the flag until the files change again. `contextdeck decisions --changed` lists only these.
+- **Replace a decision.** When marking a new decision, choose the one it **Replaces**. The old one stays, struck through, and briefs carry the new one instead. **Restore** undoes it. `contextdeck decisions --all` lists replaced ones too.
+- Handoff briefs date each decision, and ask the new agent to check them against the code and say if one no longer holds.
+- Adapters can report when each file was last edited (`fileEditedAt`). Claude Code, Codex and Qwen Code do.
+
+### Changed
+
+- The index records file edit times (schema 5), so it's rebuilt once on the first run after upgrading.
+
 - `npm run eval:meaning` is harder and more useful:
   - every topic has two look-alike sessions, so it measures ranking, not just recall;
   - there are questions no session answers, which should get nothing added by meaning;

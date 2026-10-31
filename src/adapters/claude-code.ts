@@ -6,6 +6,7 @@ import {
   asString,
   clean,
   MAX_TOOL_CHARS,
+  noteEdit,
   textFromContent,
   titleFrom,
   trackTime,
@@ -102,6 +103,7 @@ async function parse(filePath: string): Promise<ParseResult> {
   const toolNames = new Map<string, string>(); // tool_use id → name
   const seenUsage = new Set<string>(); // message.id, so streamed chunks are counted once
   const files = new Set<string>();
+  const editedAt = new Map<string, string>();
   let seq = 0;
 
   const push = (role: NormalizedSession['messages'][number]['role'], text: string, ts: unknown, toolName?: string) => {
@@ -212,7 +214,10 @@ async function parse(filePath: string): Promise<ParseResult> {
           const input = block.input as Record<string, unknown> | undefined;
           if (EDIT_TOOLS.has(name) && input) {
             const f = asString(input.file_path) ?? asString(input.notebook_path);
-            if (f) files.add(f);
+            if (f) {
+              files.add(f);
+              noteEdit(editedAt, f, o.timestamp);
+            }
           }
           push('tool', clean(summariseToolInput(name, input), MAX_TOOL_CHARS), o.timestamp, name);
         }
@@ -232,6 +237,7 @@ async function parse(filePath: string): Promise<ParseResult> {
   }
 
   s.filesTouched = [...files];
+  s.fileEditedAt = Object.fromEntries(editedAt);
   s.title = titleFrom(customTitle ?? summaryTitle ?? firstPrompt ?? firstCommand ?? '') || '(untitled session)';
 
   if (s.messages.length === 0 && !summaryTitle) {
