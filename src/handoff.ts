@@ -168,8 +168,12 @@ export function buildBrief(store: Store, ref: string, opts: BriefOptions): Brief
   const pinned = opts.home ? decisionsForChain(store, opts.home, from.id) : [];
   const decisionLines = pinned.slice(-LIMITS.decisions).map((d) => {
     const label = d.session ? getAdapter(d.session.provider)?.label : undefined;
-    const where = d.sessionId === from.id ? '' : label ? ` (decided earlier, in ${label})` : ' (decided in an earlier session)';
-    return `- ${clip(d.text, LIMITS.decision).replace(/\n/g, '\n  ')}${where}`;
+    const day = d.decidedAt.slice(0, 10);
+    const where = d.sessionId === from.id ? ` (decided ${day})` : label ? ` (decided ${day}, in ${label})` : ` (decided ${day}, in an earlier session)`;
+    const changed = d.changes.length
+      ? `\n  Since then, other sessions changed files it covers: ${d.changes.map((c) => rel(c.path, from.cwd)).join(', ')}. Check it still holds.`
+      : '';
+    return `- ${clip(d.text, LIMITS.decision).replace(/\n/g, '\n  ')}${where}${changed}`;
   });
   if (pinned.length > LIMITS.decisions) decisionLines.unshift(`- (${pinned.length - LIMITS.decisions} earlier decisions not shown)`);
 
@@ -203,7 +207,7 @@ export function buildBrief(store: Store, ref: string, opts: BriefOptions): Brief
     const steps = [
       '1. Check the current state of the code first: run `git status` and `git diff`. The files listed above may have uncommitted changes, and some work may have happened after this brief was written.',
       decisionLines.length
-        ? "2. Don't redo work that's already done, and don't reopen the decisions above unless I ask. If something looks finished, verify it instead of rewriting it."
+        ? "2. Don't redo work that's already done, and don't reopen the decisions above unless I ask. Do check them against the code: if one no longer holds, tell me before relying on it. If something looks finished, verify it instead of rewriting it."
         : "2. Don't redo work that's already done. If something above looks finished, verify it instead of rewriting it.",
       checkIn
         ? '3. Then reply with a short summary of where things stand and the next step you propose, and wait for my go-ahead before changing any files.'

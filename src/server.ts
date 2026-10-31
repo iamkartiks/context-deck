@@ -8,11 +8,13 @@ import { getAdapter, type ResumeCommand } from './adapters/index.js';
 import { loadBoard, sanitizeBoard, saveBoard } from './board.js';
 import {
   addDecision,
+  confirmDecision,
   decisionMatches,
   deleteDecision,
   isDecisionId,
   loadDecisions,
   resolveDecisions,
+  restoreDecision,
   updateDecision,
   type ResolvedDecision,
 } from './decisions.js';
@@ -199,8 +201,18 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
 
   const decisionCounts = () => {
     const counts: Record<string, number> = {};
-    for (const d of loadDecisions(cfg.home).decisions) counts[d.sessionId] = (counts[d.sessionId] ?? 0) + 1;
+    for (const d of loadDecisions(cfg.home).decisions) if (!d.replacedBy) counts[d.sessionId] = (counts[d.sessionId] ?? 0) + 1;
     return counts;
+  };
+
+  /** Short session summaries, for decisions that point at other sessions. */
+  const sessionBrief = (id: string) => {
+    try {
+      const s = store.resolve(id);
+      return { id: s.id, shortId: s.shortId, title: s.title, provider: s.provider };
+    } catch {
+      return null;
+    }
   };
 
   /** A decision as the UI needs it: the decision plus a short summary of its session. */
@@ -212,6 +224,18 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
     anchored: d.anchored,
     createdAt: d.createdAt,
     updatedAt: d.updatedAt,
+    decidedAt: d.decidedAt,
+    checkedAt: d.checkedAt ?? null,
+    replacedBy: d.replacedBy
+      ? (() => {
+          const by = loadDecisions(cfg.home).decisions.find((x) => x.id === d.replacedBy);
+          return by ? { id: by.id, text: by.text, sessionId: by.sessionId } : null;
+        })()
+      : null,
+    changes: d.changes.map((c) => ({
+      path: c.path,
+      sessions: c.sessions.map((x) => ({ editedAt: x.editedAt, session: sessionBrief(x.id) })).filter((x) => x.session),
+    })),
     session: d.session
       ? {
           id: d.session.id,
@@ -350,13 +374,14 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
     }
 
     if (method === 'POST' && path === '/api/decisions') {
-      const body = (await readBody(req)) as { sessionId?: unknown; seq?: unknown; text?: unknown } | null;
+      const body = (await readBody(req)) as { sessionId?: unknown; seq?: unknown; text?: unknown; replaces?: unknown } | null;
       if (!body || typeof body.sessionId !== 'string' || typeof body.seq !== 'number' || typeof body.text !== 'string') {
         throw new HttpError(400, 'Expected {"sessionId", "seq", "text"}.');
       }
+      if (body.replaces != null && (typeof body.replaces !== 'string' || !isDecisionId(body.replaces))) throw new HttpError(400, '"replaces" must be a decision id.');
       let created;
       try {
-        created = addDecision(cfg.home, store, { sessionId: body.sessionId, seq: body.seq, text: body.text });
+        created = addDecision(cfg.home, store, { sessionId: body.sessionId, seq: body.seq, text: body.text, replaces: (body.replaces as string | undefined) ?? null });
       } catch (err) {
         const msg = (err as Error).message;
         throw new HttpError(/No session matches/.test(msg) ? 404 : 400, msg);
@@ -373,11 +398,18 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
         broadcast('decisions', { count: loadDecisions(cfg.home).decisions.length });
         return send(res, 200, { ok: true });
       }
-      const body = (await readBody(req)) as { text?: unknown } | null;
-      if (!body || typeof body.text !== 'string') throw new HttpError(400, 'Expected {"text"}.');
+      // One change per request: new words, "still true", or undo a replacement
+      const body = (await readBody(req)) as { text?: unknown; stillTrue?: unknown; restore?: unknown } | null;
+      const ok = body && (typeof body.text === 'string' || body.stillTrue === true || body.restore === true);
+      if (!ok) throw new HttpError(400, 'Expected {"text"}, {"stillTrue": true} or {"restore": true}.');
       let updated;
       try {
-        updated = updateDecision(cfg.home, id, body.text);
+        updated =
+          typeof body.text === 'string'
+            ? updateDecision(cfg.home, id, body.text)
+            : body.stillTrue === true
+              ? confirmDecision(cfg.home, id)
+              : restoreDecision(cfg.home, id);
       } catch (err) {
         const msg = (err as Error).message;
         throw new HttpError(/No such/.test(msg) ? 404 : 400, msg);

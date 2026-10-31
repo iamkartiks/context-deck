@@ -1929,6 +1929,136 @@ mark {
   white-space: nowrap;
 }
 
+/* A decision whose files changed since, or that a newer one replaced */
+.decision.changed {
+  border-color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--ink);
+}
+
+.decision .d-changed {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px 6px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.decision .d-changed-head {
+  margin: 0;
+  font-weight: 500;
+}
+
+.decision .d-changed ul {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.decision .d-changed li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.decision .d-changed code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.decision .d-changed .d-by {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  margin-left: 0;
+  padding: 0 4px;
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-2);
+  text-decoration: underline;
+  text-decoration-color: var(--line-3);
+  text-underline-offset: 3px;
+}
+
+.decision .d-changed .d-by:hover {
+  color: var(--ink);
+  text-decoration-color: currentColor;
+}
+
+.decision .d-changed .note {
+  margin: 0;
+  font-size: 11.5px;
+}
+
+.decision.replaced {
+  border-color: var(--line-3);
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+}
+
+.decision.replaced .d-text {
+  color: var(--muted);
+  font-weight: 400;
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.decision .d-replaced-by {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.decision .d-replaced-by .label,
+.decide-replaces-row .label {
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.decide-replaces-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.decide-replaces-row[hidden] {
+  display: none;
+}
+
+.decide-replaces {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line-3);
+  border-radius: 10px;
+  background: var(--ground);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.decide-replaces:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+
+.d-check-note {
+  margin: 0 0 4px;
+}
+
 .list.decisions .empty strong {
   font-weight: 500;
 }
@@ -1944,6 +2074,9 @@ mark {
   }
   .decision-grid {
     grid-template-columns: minmax(0, 1fr);
+    padding: 0 16px;
+  }
+  .d-check-note {
     padding: 0 16px;
   }
   .find-count {
