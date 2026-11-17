@@ -11,7 +11,8 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
   - **Only on your tailnet:** it never uses Tailscale Funnel, and refuses to start if Funnel is on.
   - **Managing phones:** **Phones** in the canvas, `contextdeck phone devices` and `contextdeck phone revoke <id|all>`.
   - **Audit log:** every pairing and every change a phone makes goes in `~/.contextdeck/phone-audit.log`, without content.
-  - **Limits:** phones can't open terminals, start handoffs, rescan or change settings.
+  - **Limits:** phones can't open terminals, rescan or change settings.
+- **Set agents to work from your phone** (in phone mode, if you allow it per phone). Hand a session off, or send it a message: the agent runs on your computer in the session's folder, in **Plan only** or (if allowed) **Edit files in <folder>**, and you follow it live and can stop it. Cards show **Running**, **Waiting** or **Done**, and the computer says when a phone started something. Claude Code, Codex and Qwen Code run headless with a fixed set of flags that never skips permission checks.
 
 - **Decisions that may be out of date are flagged.** If a later session that never had a decision (in any tool) edits the files it covers, the Decisions view lists it first with the file and the session, `contextdeck decisions` marks it, and handoff briefs say so. **Still true** clears the flag until the files change again. `contextdeck decisions --changed` lists only these.
 - **Replace a decision.** When marking a new decision, choose the one it **Replaces**. The old one stays, struck through, and briefs carry the new one instead. **Restore** undoes it. `contextdeck decisions --all` lists replaced ones too.

@@ -417,11 +417,12 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       pairPhones: !!phoneHost && !ctx.remote,
       device: ctx.device ? { id: ctx.device.id, name: ctx.device.name, scopes: ctx.device.scopes } : null,
       /** Runs: what this page may start, and the tools that can run without a terminal. */
+      // Only in phone mode: plain `contextdeck ui` starts nothing
       runs: {
-        handoff: may('handoff'),
-        run: may('run'),
-        edit: may('edit'),
-        tools: ADAPTERS.filter((a) => a.headless).map((a) => ({ id: a.id, label: a.label })),
+        handoff: !!phoneHost && may('handoff'),
+        run: !!phoneHost && may('run'),
+        edit: !!phoneHost && may('edit'),
+        tools: phoneHost ? ADAPTERS.filter((a) => a.headless).map((a) => ({ id: a.id, label: a.label })) : [],
       },
     };
   };
@@ -790,7 +791,7 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
         cwdExists: !!cwd && existsSync(cwd),
         crossProvider: brief.from.provider !== to,
         briefPath: join(cfg.home, 'handoffs', `${brief.handoffId}.md`),
-        canOpenTerminal,
+        canOpenTerminal: canOpenTerminal && !ctx.remote,
       });
     }
 
@@ -986,6 +987,7 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
     }
 
     if (method === 'POST' && path === '/api/runs') {
+      if (!phoneHost) throw new HttpError(409, 'Starting agents from ContextDeck is part of phone mode. Start it with `contextdeck ui --phone`.');
       const body = (await readBody(req)) as Record<string, unknown> | null;
       if (!body || typeof body !== 'object') throw new HttpError(400, 'Expected {"kind", "mode", …}.');
       if (ctx.remote) {

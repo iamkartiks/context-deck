@@ -210,7 +210,7 @@ The model server must be on this computer. Pointing ContextDeck at one elsewhere
 
 ## Use it from your phone
 
-Read your sessions and mark decisions from your phone, while everything stays on your computer. The phone is only a screen: it doesn't store your sessions, and nothing passes through a server you don't own.
+Read your sessions, mark decisions and set agents to work from your phone, while everything stays on your computer. The phone is only a screen: it doesn't store your sessions, and nothing passes through a server you don't own.
 
 It works over [Tailscale](https://tailscale.com), on your own private network (your *tailnet*). You need:
 - Tailscale on your computer and your phone, signed in to the same account;
@@ -224,11 +224,15 @@ contextdeck ui --phone
 2. Scan the QR code in the terminal, or under **Phones** in the canvas, with your phone's camera. A code works once, for 5 minutes.
 3. Your computer asks: *Allow Pixel 9 (you@example.com) to open ContextDeck?* Choose **Allow**.
 4. The phone opens ContextDeck in List view. Use **Add to Home Screen** to keep it handy.
+5. To let it start agents, open **Phones** on the computer and tick what it may do: hand off sessions, send messages, edit files.
 
 | | |
 |---|---|
-| **What a phone can do** | Browse, search and read sessions, and mark or edit decisions. You can turn off **Can mark decisions** for a phone under **Phones**. |
-| **What it can't** | Open terminals, start handoffs, rescan, move cards or change settings. Those stay on the computer. |
+| **What a phone can do** | Browse, search and read sessions, follow agents at work, and mark or edit decisions. |
+| **Setting agents to work** | If you allow it under **Phones**: hand a session off to an agent, or send a session a message. The agent runs on your computer, in the session's folder, and the phone shows what it's doing live, with **Stop**. |
+| **Plan only, or edit** | Each run is **Plan only** (it reads and suggests, and changes nothing) unless the phone is also allowed to **edit files**; then you choose, and the folder is named in full. Nothing a phone sends can turn off an agent's permission checks. |
+| **Where agents run** | Only in folders where you've used that tool yourself, because Claude Code runs a folder's hooks and MCP servers without asking in this mode. Codex also runs in other folders you've worked in, since it checks project trust itself. |
+| **What it can't** | Open terminals, rescan, move cards or change settings. Those stay on the computer. |
 | **Disconnecting** | **Disconnect** under **Phones**, or `contextdeck phone revoke <id\|all>` (`contextdeck phone devices` lists them). The phone loses access straight away. A phone not seen for 30 days is disconnected by itself. |
 | **When it stops** | Phone mode is on only while `contextdeck ui --phone` runs. Ctrl+C removes the Tailscale Serve entry ContextDeck added; nothing else in your Tailscale settings changes. |
 | **Your own Serve setup** | `--phone --no-serve` leaves Tailscale Serve to you. ContextDeck still checks Funnel is off. |
