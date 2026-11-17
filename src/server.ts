@@ -40,6 +40,11 @@ import { HANDOFF_ID_RE } from './handoff-marker.js';
  *    only embedded in the page this server serves, and a matching Origin,
  *  - the page runs under a strict Content-Security-Policy with no external
  *    sources, so it makes no network requests beyond this server.
+ *
+ * Phone mode (`opts.phone`) adds this computer's tailnet name as one more Host,
+ * for requests proxied by Tailscale Serve. Those are "remote" (see
+ * `requestContext`), must carry a Tailscale login, and get nothing until a
+ * device is paired.
  */
 
 const UI_DIR = fileURLToPath(new URL('../../ui/', import.meta.url));
@@ -86,6 +91,54 @@ export interface UiServerOptions {
   initialIndex?: IndexSummary;
   /** Search by meaning (tests pass their own). */
   meaning?: MeaningService;
+  /**
+   * Phone mode: also accept requests proxied by Tailscale Serve from this
+   * tailnet name. Off unless set; nothing in the CLI sets it yet.
+   */
+  phone?: PhoneOptions;
+}
+
+export interface PhoneOptions {
+  /** This computer's tailnet name, e.g. `laptop.tail1234.ts.net` (from `tailscale status --json`). */
+  tailnetHost: string;
+}
+
+/**
+ * Who a request came from. Local requests come from a browser on this
+ * computer; remote ones came through Tailscale Serve from another device.
+ */
+export interface RequestContext {
+  remote: boolean;
+  /** The Tailscale login Serve vouched for (remote requests only). */
+  login: string | null;
+}
+
+/**
+ * Headers a reverse proxy adds. A local browser has no reason to send them, so
+ * in phone mode a request carrying any of them is treated as remote even if
+ * its Host looks local. That way a proxy that rewrites Host can't make a phone
+ * look like this computer.
+ */
+const PROXY_HEADERS = [
+  'tailscale-user-login',
+  'tailscale-user-name',
+  'tailscale-user-profile-pic',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-proto',
+  'forwarded',
+];
+
+const HOSTNAME_RE = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+
+/**
+ * A tailnet name as a Host header carries it: lowercase, no trailing dot, no
+ * port. Throws for anything that isn't a plain multi-label DNS name.
+ */
+export function normalizeTailnetHost(name: string): string {
+  const host = name.trim().replace(/\.$/, '').toLowerCase();
+  if (!HOSTNAME_RE.test(host)) throw new Error(`"${name}" isn't a tailnet name like laptop.tail1234.ts.net.`);
+  return host;
 }
 
 export interface UiServer {
@@ -163,8 +216,33 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
   let lastIndex: IndexSummary | null = opts.initialIndex ?? null;
   let version = 0;
 
+  const phoneHost = opts.phone ? normalizeTailnetHost(opts.phone.tailnetHost) : null;
   const allowedHosts = () => new Set([`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`]);
-  const allowedOrigins = () => new Set([...allowedHosts()].map((h) => `http://${h}`));
+  const allowedOrigins = (ctx: RequestContext) =>
+    ctx.remote ? new Set([`https://${phoneHost}`]) : new Set([...allowedHosts()].map((h) => `http://${h}`));
+
+  /**
+   * Local or remote, decided once per request. Every request arrives from
+   * 127.0.0.1 (Serve proxies them), so the Host header and proxy headers are
+   * what tell them apart. Remote requests must carry the Tailscale login that
+   * Serve adds; Serve strips copies sent by clients.
+   */
+  const requestContext = (req: IncomingMessage): RequestContext => {
+    const host = req.headers.host ?? '';
+    if (allowedHosts().has(host)) {
+      if (!phoneHost || !PROXY_HEADERS.some((h) => req.headers[h] !== undefined)) return { remote: false, login: null };
+    } else if (!phoneHost || host.toLowerCase() !== phoneHost) {
+      throw new HttpError(403, 'Unexpected Host header.');
+    }
+    const login = req.headers['tailscale-user-login'];
+    if (typeof login !== 'string' || !login.trim()) {
+      throw new HttpError(
+        403,
+        'This request came through Tailscale without a signed-in user (for example from a tagged device). Open ContextDeck from a device signed in to your Tailscale account.',
+      );
+    }
+    return { remote: true, login: login.trim() };
+  };
 
   const broadcast = (event: string, data: unknown) => {
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -286,17 +364,18 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
   };
 
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const host = req.headers.host ?? '';
-    if (!allowedHosts().has(host)) throw new HttpError(403, 'Unexpected Host header.');
+    const ctx = requestContext(req);
+    // Pairing devices comes next; until then a remote request gets nothing
+    if (ctx.remote) throw new HttpError(401, 'This device isn’t paired with ContextDeck.');
 
-    const url = new URL(req.url ?? '/', `http://${host}`);
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? ''}`);
     const method = req.method ?? 'GET';
     const path = url.pathname;
 
     const isWrite = method !== 'GET' && method !== 'HEAD';
     if (isWrite) {
       const origin = req.headers.origin;
-      if (origin && !allowedOrigins().has(origin)) throw new HttpError(403, 'Cross-origin request refused.');
+      if (origin && !allowedOrigins(ctx).has(origin)) throw new HttpError(403, 'Cross-origin request refused.');
       const given = req.headers['x-contextdeck-token'];
       if (typeof given !== 'string' || !safeEqual(given, token)) throw new HttpError(403, 'Missing or wrong token.');
     }

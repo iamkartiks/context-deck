@@ -31,6 +31,17 @@ The UI is served by a small HTTP server that only listens on `127.0.0.1`. Becaus
 - On Windows the brief never goes on a command line. The tool is started with a one-line pointer to the brief file, built only from the session title (special characters removed), the brief's path and the marker. Reading an earlier brief back is done by handoff id, inside ContextDeck's own folder only.
 - Like every other write, `POST /api/handoff` needs the per-run token and a matching Origin. The target must be a known tool.
 
+### Phone mode (in development, not yet reachable)
+
+Phone mode will let devices on your own Tailscale network reach the canvas through Tailscale Serve, which proxies HTTPS from your tailnet to the server on `127.0.0.1`. The server still listens only on `127.0.0.1`. The groundwork that's in place today:
+
+- **Local or remote.** In phone mode, one more `Host` is accepted: this computer's exact tailnet name (e.g. `laptop.tail1234.ts.net`), never a wildcard. Requests with that Host are remote. A request carrying a proxy header (`Tailscale-User-*`, `X-Forwarded-*`, `Forwarded`) is also treated as remote, even if its Host looks local, so a proxy that rewrites Host can't make a phone look like this computer.
+- **A Tailscale user is required.** Remote requests must carry the `Tailscale-User-Login` header that Serve adds and strips from clients. Without it (for example, traffic from a tagged device) the request is refused with 403.
+- **Nothing is served to remote devices yet.** Until device pairing exists, every remote request gets 401: no page, no token, no data.
+- **Origins are kept apart.** Local writes accept only `http://` loopback origins. Remote writes will accept only `https://<tailnet name>`.
+
+**Out of scope:** a program already running on this computer could call `127.0.0.1` directly and forge these headers. That program can already read `~/.claude` and every other session folder, so phone mode doesn't defend against it.
+
 `board.json` (your canvas arrangement) contains only session ids and coordinates.
 
 **Search by meaning** is off by default; while off, nothing talks to any model.
