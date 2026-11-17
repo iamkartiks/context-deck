@@ -122,7 +122,7 @@ Off unless turned on (`~/.contextdeck/config.json`); while off, no code path tal
 | `GET /api/matches?id=&q=` | Every matching message in one session, in order, for "find in this conversation" |
 | `GET /api/decisions` | Every decision, with where it is now and a summary of its session |
 | `POST /api/decisions` · `PUT` / `DELETE /api/decisions/:id` | Mark (optionally `replaces` an earlier one), edit (`{text}`, `{stillTrue: true}` or `{restore: true}`) and remove decisions (stored in `decisions.json`) |
-| `GET /api/events` | Server-sent events; `index` fires whenever the watcher re-indexes, `decisions` when decisions change, `semantic` with search-by-meaning progress, `run` when a run changes state and `run-event` with its output; `devices` (this computer only) when phones or pairing requests change |
+| `GET /api/events` | Server-sent events; `index` fires whenever the watcher re-indexes, `decisions` when decisions change, `semantic` with search-by-meaning progress, `run` when a run changes state and `run-event` with its output; `devices` (this computer only) when phones or pairing requests change; `approval` (this computer, and phones that may answer) when a request is asked or answered. Events aren't replayed: after reconnecting (or when a phone's page is shown again after a while) the page reads the board, runs and requests again |
 | `GET` / `PUT /api/layout` | Hand-placed card positions, stored in `board.json` (not in the index, so rebuilding the index never loses them) |
 | `POST /api/reindex` | Rescan now |
 | `POST /api/open-terminal` | Run a session's resume command in a new terminal window (501 when none is available) |
