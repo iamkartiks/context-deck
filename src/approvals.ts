@@ -22,8 +22,9 @@ import { redact } from './util/redact.js';
  * one text block whose text is `{"behavior":"allow"}` (optionally with
  * `updatedInput`) or `{"behavior":"deny","message":"…"}`. Before Claude Code
  * 2.1.207 an allow needed `updatedInput`, so it is always sent, unchanged.
- * The request's own fields aren't documented there; `tool_name`, `input` and
- * `tool_use_id` are expected, and the camelCase spellings are accepted too.
+ * The request's own fields aren't documented there. A real run with Claude
+ * Code 2.1.326 (test/headless-real.test.ts) sent `tool_name` and `input`, and
+ * an allow let the call go ahead; the camelCase spellings are accepted too.
  */
 
 export const APPROVER_SERVER = 'contextdeck';
