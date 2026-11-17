@@ -31,14 +31,41 @@ The UI is served by a small HTTP server that only listens on `127.0.0.1`. Becaus
 - On Windows the brief never goes on a command line. The tool is started with a one-line pointer to the brief file, built only from the session title (special characters removed), the brief's path and the marker. Reading an earlier brief back is done by handoff id, inside ContextDeck's own folder only.
 - Like every other write, `POST /api/handoff` needs the per-run token and a matching Origin. The target must be a known tool.
 
-### Phone mode (in development, not yet reachable)
+### Phone mode (in development; not yet available from the command line)
 
 Phone mode will let devices on your own Tailscale network reach the canvas through Tailscale Serve, which proxies HTTPS from your tailnet to the server on `127.0.0.1`. The server still listens only on `127.0.0.1`. The groundwork that's in place today:
 
 - **Local or remote.** In phone mode, one more `Host` is accepted: this computer's exact tailnet name (e.g. `laptop.tail1234.ts.net`), never a wildcard. Requests with that Host are remote. A request carrying a proxy header (`Tailscale-User-*`, `X-Forwarded-*`, `Forwarded`) is also treated as remote, even if its Host looks local, so a proxy that rewrites Host can't make a phone look like this computer.
 - **A Tailscale user is required.** Remote requests must carry the `Tailscale-User-Login` header that Serve adds and strips from clients. Without it (for example, traffic from a tagged device) the request is refused with 403.
-- **Nothing is served to remote devices yet.** Until device pairing exists, every remote request gets 401: no page, no token, no data.
-- **Origins are kept apart.** Local writes accept only `http://` loopback origins. Remote writes will accept only `https://<tailnet name>`.
+- **Origins are kept apart.** Local writes accept only `http://` loopback origins. Remote writes must carry `Origin: https://<tailnet name>`, and then need the per-run token like every other write.
+
+**Pairing a device:**
+
+1. On the computer, a one-time pairing code is made: 128 random bits, held in memory only, valid for 5 minutes, usable once. Making a new code cancels the last one.
+2. The code travels in the URL fragment (`https://<tailnet name>/pair#<code>`), which browsers never send to a server, so it can't show up in logs or Referer headers. The pairing page removes it from the address bar.
+3. The pairing page is the only thing an unpaired device can load. It holds no token and no data.
+4. The phone sends the code and a device name. A right code creates a *pending* request tied to the phone's Tailscale login.
+5. **The computer must allow it.** Allowing or denying is a local-only action. A photographed QR code alone isn't enough to pair.
+6. Once allowed, the phone gets a 256-bit device secret in a cookie (`HttpOnly; Secure; SameSite=Strict`, 30 days).
+7. `~/.contextdeck/devices.json` (owner-only) stores only the secret's SHA-256.
+
+**Limits on pairing:**
+- 5 tries per minute, counted per Tailscale login and in total;
+- at most 10 devices, with waiting requests counting toward the limit;
+- requests expire after 5 minutes.
+
+**On every remote request:**
+- the cookie's hash must match a device;
+- the device must belong to the same Tailscale login, so a stolen cookie is useless to anyone else;
+- the device must not have expired. A device expires 30 days after it was last seen.
+
+**Scopes:** each route needs a scope, listed in one table (`src/scopes.ts`). Any route missing from that table is refused to remote devices.
+- New devices get `view` and `decide`.
+- Opening a terminal, changing the layout, rescanning, search-by-meaning settings, starting a handoff, and managing devices are never allowed remotely, whatever a device holds.
+
+**Revoking** removes the device. Its next request fails, and its open event streams close within a second, even when it was revoked from the command line.
+
+**Audit log:** `~/.contextdeck/phone-audit.log` (owner-only) gets one JSON line per pairing request, approval, denial, revocation, scope change and write from a device. Entries hold ids, routes and outcomes, never message text, briefs or secrets. The log is rotated at 1 MB, keeping one old file.
 
 **Out of scope:** a program already running on this computer could call `127.0.0.1` directly and forge these headers. That program can already read `~/.claude` and every other session folder, so phone mode doesn't defend against it.
 

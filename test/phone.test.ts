@@ -74,12 +74,14 @@ describe('phone mode: local and remote requests', () => {
     assert.equal((await call(phone.port, '/api/board', { headers: viaServe({ 'Tailscale-User-Login': ' ' }) })).status, 403);
   });
 
-  it('gives an unpaired remote device nothing: no page, no token, no data', async () => {
+  it('gives an unpaired remote device only the pairing page: no token, no data', async () => {
     const page = await call(phone.port, '/', { headers: viaServe() });
-    assert.equal(page.status, 401);
+    assert.equal(page.status, 200);
+    assert.match(page.body, /Pair with ContextDeck/);
     assert.ok(!page.body.includes(phone.token));
     assert.ok(!page.body.includes('__CONTEXTDECK_TOKEN__'));
-    for (const path of ['/api/board', '/api/decisions', '/api/events', '/app.js']) {
+    assert.match(String(page.headers['content-security-policy']), /default-src 'none'/);
+    for (const path of ['/api/board', '/api/decisions', '/api/events', '/app.js', '/style.css']) {
       assert.equal((await call(phone.port, path, { headers: viaServe() })).status, 401, path);
     }
     const write = await call(phone.port, '/api/reindex', {
@@ -94,8 +96,9 @@ describe('phone mode: local and remote requests', () => {
       const headers = { [header]: header === 'Tailscale-User-Login' ? LOGIN : 'x' };
       if (header !== 'Tailscale-User-Login') headers['Tailscale-User-Login'] = LOGIN;
       const r = await call(phone.port, '/', { headers });
-      assert.equal(r.status, 401, header);
+      assert.match(r.body, /Pair with ContextDeck/, header);
       assert.ok(!r.body.includes(phone.token), header);
+      assert.equal((await call(phone.port, '/api/board', { headers })).status, 401, header);
     }
     // Without a login it is refused outright
     assert.equal((await call(phone.port, '/', { headers: { 'X-Forwarded-For': '100.64.0.7' } })).status, 403);

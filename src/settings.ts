@@ -24,9 +24,18 @@ export interface SemanticSettings {
   minScore: number | null;
 }
 
+/** Phone mode limits. Phone mode itself is only on while `contextdeck ui --phone` runs. */
+export interface PhoneSettings {
+  /** A paired device is forgotten after this many days unseen. */
+  deviceIdleDays: number;
+  /** At most this many paired devices (pending requests count too). */
+  maxDevices: number;
+}
+
 export interface Settings {
   version: 1;
   semantic: SemanticSettings;
+  phone: PhoneSettings;
 }
 
 export const DEFAULT_MODEL = 'qwen3-embedding:0.6b';
@@ -39,6 +48,7 @@ export function defaultSettings(): Settings {
   return {
     version: 1,
     semantic: { enabled: false, api: 'ollama', url: DEFAULT_URLS.ollama, model: DEFAULT_MODEL, dims: 512, allowRemote: false, minScore: null },
+    phone: { deviceIdleDays: 30, maxDevices: 10 },
   };
 }
 
@@ -47,6 +57,12 @@ export const settingsPath = (home: string) => join(home, 'config.json');
 /** Validate untrusted settings. Anything invalid falls back to the default. */
 export function sanitizeSettings(input: unknown): Settings {
   const out = defaultSettings();
+  const p = (input as { phone?: Record<string, unknown> } | null)?.phone;
+  if (p && typeof p === 'object') {
+    const int = (v: unknown, min: number, max: number) => typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
+    if (int(p.deviceIdleDays, 1, 365)) out.phone.deviceIdleDays = p.deviceIdleDays as number;
+    if (int(p.maxDevices, 1, 50)) out.phone.maxDevices = p.maxDevices as number;
+  }
   const s = (input as { semantic?: Record<string, unknown> } | null)?.semantic;
   if (!s || typeof s !== 'object') return out;
   const sem = out.semantic;

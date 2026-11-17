@@ -28,6 +28,32 @@ import { MeaningService } from './meaning.js';
 import { isLocalUrl, type SemanticSettings } from './settings.js';
 import { commandText, findTerminal, openInTerminal, type Launch, type TerminalInfo } from './platform.js';
 import { HANDOFF_ID_RE } from './handoff-marker.js';
+import { appendAudit } from './audit.js';
+import {
+  DEFAULT_SCOPES,
+  cleanDeviceName,
+  cleanLogin,
+  findByHash,
+  hashSecret,
+  idleExpiry,
+  isDeviceId,
+  isPendingId,
+  isScope,
+  loadDevices,
+  newDeviceId,
+  newPendingId,
+  newSecret,
+  pruneDevices,
+  publicDevice,
+  publicPending,
+  revokeDevices,
+  saveDevices,
+  PENDING_MS,
+  type Device,
+} from './devices.js';
+import { PairingCodes } from './pairing.js';
+import { routeAccess, type RouteAccess } from './scopes.js';
+import { loadSettings } from './settings.js';
 
 /**
  * The local web UI server.
@@ -59,6 +85,20 @@ const STATIC: Record<string, { file: string; type: string }> = {
   '/fonts/geist-mono-latin-wght-normal.woff2': { file: 'fonts/geist-mono-latin-wght-normal.woff2', type: 'font/woff2' },
   '/fonts/geist-mono-latin-ext-wght-normal.woff2': { file: 'fonts/geist-mono-latin-ext-wght-normal.woff2', type: 'font/woff2' },
 };
+
+/** The only files an unpaired device can load: the pairing page, which holds no token and no data. */
+const PAIR_STATIC: Record<string, { file: string; type: string }> = {
+  '/pair': { file: 'pair.html', type: 'text/html; charset=utf-8' },
+  '/pair.js': { file: 'pair.js', type: 'text/javascript; charset=utf-8' },
+  '/pair.css': { file: 'pair.css', type: 'text/css; charset=utf-8' },
+  '/favicon.svg': { file: 'favicon.svg', type: 'image/svg+xml' },
+};
+
+const DEVICE_COOKIE = 'cd_device';
+const PENDING_COOKIE = 'cd_pending';
+const DEVICE_COOKIE_MAX_AGE = 30 * 86_400;
+/** Update a device's "last seen" at most this often. */
+const SEEN_EVERY_MS = 60_000;
 
 const CSP = [
   "default-src 'none'",
@@ -96,6 +136,8 @@ export interface UiServerOptions {
    * tailnet name. Off unless set; nothing in the CLI sets it yet.
    */
   phone?: PhoneOptions;
+  /** Pairing codes and their rate limit (tests pass their own). */
+  pairing?: PairingCodes;
 }
 
 export interface PhoneOptions {
@@ -111,6 +153,24 @@ export interface RequestContext {
   remote: boolean;
   /** The Tailscale login Serve vouched for (remote requests only). */
   login: string | null;
+  /** The paired device making a remote request, once its cookie checks out. */
+  device: Device | null;
+}
+
+/** One cookie's value from the Cookie header, or null. */
+function readCookie(req: IncomingMessage, name: string): string | null {
+  for (const part of (req.headers.cookie ?? '').split(';')) {
+    const at = part.indexOf('=');
+    if (at > 0 && part.slice(0, at).trim() === name) {
+      const v = part.slice(at + 1).trim();
+      return /^[A-Za-z0-9_-]{16,128}$/.test(v) ? v : null;
+    }
+  }
+  return null;
+}
+
+function cookie(name: string, value: string, path: string, maxAge: number): string {
+  return `${name}=${value}; HttpOnly; Secure; SameSite=Strict; Path=${path}; Max-Age=${maxAge}`;
 }
 
 /**
@@ -211,7 +271,9 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
     }
   };
   const meaning = opts.meaning ?? new MeaningService(store, cfg.home);
-  const clients = new Set<ServerResponse>();
+  /** Open event streams, with the paired device each belongs to (null for this computer). */
+  const clients = new Map<ServerResponse, string | null>();
+  const codes = opts.pairing ?? new PairingCodes();
   let port = 0;
   let lastIndex: IndexSummary | null = opts.initialIndex ?? null;
   let version = 0;
@@ -230,7 +292,7 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
   const requestContext = (req: IncomingMessage): RequestContext => {
     const host = req.headers.host ?? '';
     if (allowedHosts().has(host)) {
-      if (!phoneHost || !PROXY_HEADERS.some((h) => req.headers[h] !== undefined)) return { remote: false, login: null };
+      if (!phoneHost || !PROXY_HEADERS.some((h) => req.headers[h] !== undefined)) return { remote: false, login: null, device: null };
     } else if (!phoneHost || host.toLowerCase() !== phoneHost) {
       throw new HttpError(403, 'Unexpected Host header.');
     }
@@ -241,12 +303,62 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
         'This request came through Tailscale without a signed-in user (for example from a tagged device). Open ContextDeck from a device signed in to your Tailscale account.',
       );
     }
-    return { remote: true, login: login.trim() };
+    return { remote: true, login: cleanLogin(login), device: null };
   };
 
-  const broadcast = (event: string, data: unknown) => {
+  /**
+   * The paired device a remote request comes from: its cookie's hash must
+   * match a device, the device must belong to the same Tailscale login, and it
+   * must not have expired. Seeing it pushes its expiry back.
+   */
+  const authenticate = (req: IncomingMessage, login: string): Device | null => {
+    const secret = readCookie(req, DEVICE_COOKIE);
+    if (!secret) return null;
+    const file = loadDevices(cfg.home);
+    const pruned = pruneDevices(file);
+    const device = findByHash(file.devices, secret, (d) => d.secretHash);
+    const now = Date.now();
+    if (device && device.tailscaleLogin === login) {
+      if (now - Date.parse(device.lastSeenAt) >= SEEN_EVERY_MS) {
+        device.lastSeenAt = new Date(now).toISOString();
+        device.expiresAt = idleExpiry(now, loadSettings(cfg.home).phone.deviceIdleDays);
+        saveDevices(cfg.home, file);
+      } else if (pruned) saveDevices(cfg.home, file);
+      return device;
+    }
+    if (pruned) saveDevices(cfg.home, file);
+    return null;
+  };
+
+  /** End the event streams of devices that were revoked, expired or lost "view". */
+  const closeStaleStreams = (only?: string[]) => {
+    const remote = [...clients].filter(([, id]) => id !== null);
+    if (!remote.length) return;
+    const now = Date.now();
+    const live = new Map(loadDevices(cfg.home).devices.map((d) => [d.id, d]));
+    for (const [res, id] of remote) {
+      const d = live.get(id!);
+      const stale = only ? only.includes(id!) : !d || Date.parse(d.expiresAt) <= now || !d.scopes.includes('view');
+      if (stale) {
+        clients.delete(res);
+        res.end();
+      }
+    }
+  };
+
+  const devicesView = () => {
+    const file = loadDevices(cfg.home);
+    pruneDevices(file);
+    return {
+      phone: !!phoneHost,
+      devices: file.devices.map(publicDevice),
+      pending: file.pending.filter((p) => p.state === 'waiting').map(publicPending),
+    };
+  };
+
+  const broadcast = (event: string, data: unknown, opts: { localOnly?: boolean } = {}) => {
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-    for (const res of clients) res.write(payload);
+    for (const [res, deviceId] of clients) if (!opts.localOnly || deviceId === null) res.write(payload);
   };
 
   // ── API handlers ─────────────────────────────────────────────────────────
@@ -363,17 +475,63 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
     };
   };
 
-  const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const ctx = requestContext(req);
-    // Pairing devices comes next; until then a remote request gets nothing
-    if (ctx.remote) throw new HttpError(401, 'This device isn’t paired with ContextDeck.');
+  const servePairPage = async (res: ServerResponse, method: string, asset: { file: string; type: string }) => {
+    const body = await readFile(UI_DIR + asset.file);
+    res.writeHead(200, {
+      'Content-Type': asset.type,
+      'Cache-Control': 'no-store',
+      'Content-Security-Policy': CSP,
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
+      'Cross-Origin-Resource-Policy': 'same-origin',
+    });
+    res.end(method === 'HEAD' ? undefined : body);
+  };
 
+  /**
+   * Gate for remote requests. Only the pairing page and pairing routes are
+   * open to unpaired devices. Everything else needs a paired device holding
+   * the route's scope, and `local` routes are refused whatever it holds.
+   */
+  const checkRemote = (req: IncomingMessage, ctx: RequestContext, method: string, path: string, isWrite: boolean): RouteAccess | null => {
+    const read = method === 'GET' || method === 'HEAD';
+    const access: RouteAccess | null = path.startsWith('/api/')
+      ? routeAccess(method, path)
+      : read && PAIR_STATIC[path]
+        ? 'pairing'
+        : read && STATIC[path]
+          ? 'view'
+          : null;
+    // Browsers always send Origin on writes; from a phone it must be the tailnet page
+    if (isWrite && req.headers.origin !== `https://${phoneHost}`) throw new HttpError(403, 'Cross-origin request refused.');
+    if (access === 'pairing') return access;
+    ctx.device = authenticate(req, ctx.login!);
+    if (!ctx.device) return null;
+    if (access === null) throw new HttpError(404, 'Not found.');
+    if (access === 'local') throw new HttpError(403, 'That can only be done on the computer running ContextDeck.');
+    if (!ctx.device.scopes.includes(access)) throw new HttpError(403, 'This device isn’t allowed to do that. You can change what it may do on your computer.');
+    return access;
+  };
+
+  const handle = async (req: IncomingMessage, res: ServerResponse, ctx: RequestContext): Promise<void> => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? ''}`);
     const method = req.method ?? 'GET';
     const path = url.pathname;
-
     const isWrite = method !== 'GET' && method !== 'HEAD';
-    if (isWrite) {
+
+    let access: RouteAccess | null = null;
+    if (ctx.remote) {
+      access = checkRemote(req, ctx, method, path, isWrite);
+      if (access === null) {
+        // Not paired (or not any more): the pairing page, and nothing else
+        if (method === 'GET' && path === '/') return servePairPage(res, method, PAIR_STATIC['/pair']!);
+        throw new HttpError(401, 'This device isn’t paired with ContextDeck. Scan the code on your computer to pair it.');
+      }
+      if (access === 'pairing' && !path.startsWith('/api/')) return servePairPage(res, method, PAIR_STATIC[path]!);
+    }
+
+    // Pairing routes are the one kind of write an unpaired phone makes, so they have no token
+    if (isWrite && access !== 'pairing') {
       const origin = req.headers.origin;
       if (origin && !allowedOrigins(ctx).has(origin)) throw new HttpError(403, 'Cross-origin request refused.');
       const given = req.headers['x-contextdeck-token'];
@@ -622,6 +780,136 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       return send(res, 200, { ok: true, command: line });
     }
 
+    // ── Pairing, from the phone ──
+    if (method === 'POST' && path === '/api/pair') {
+      if (!ctx.remote) throw new HttpError(400, 'Pairing happens on the phone: scan the code shown on this computer.');
+      const login = ctx.login!;
+      const body = (await readBody(req)) as { code?: unknown; name?: unknown } | null;
+      const check = codes.consume(body?.code, login);
+      if (check !== 'ok') {
+        appendAudit(cfg.home, { action: 'pair-refused', login, reason: check });
+        if (check === 'too-many') throw new HttpError(429, 'Too many tries. Wait a minute, then scan a new code.');
+        throw new HttpError(403, check === 'wrong' ? 'That pairing code isn’t right. Scan the code on your computer again.' : 'That pairing code has expired or was already used. Make a new one on your computer.');
+      }
+      const file = loadDevices(cfg.home);
+      pruneDevices(file);
+      const max = loadSettings(cfg.home).phone.maxDevices;
+      if (file.devices.length + file.pending.length >= max) {
+        appendAudit(cfg.home, { action: 'pair-refused', login, reason: 'too-many-devices' });
+        throw new HttpError(409, `This computer already has ${max} phones paired or waiting. Remove one on the computer first.`);
+      }
+      const claim = newSecret();
+      const now = Date.now();
+      const pending = {
+        id: newPendingId(),
+        name: cleanDeviceName(body?.name),
+        tailscaleLogin: login,
+        claimHash: hashSecret(claim),
+        state: 'waiting' as const,
+        requestedAt: new Date(now).toISOString(),
+        expiresAt: new Date(now + PENDING_MS).toISOString(),
+      };
+      file.pending.push(pending);
+      saveDevices(cfg.home, file);
+      appendAudit(cfg.home, { action: 'pair-requested', pendingId: pending.id, login });
+      broadcast('devices', devicesView(), { localOnly: true });
+      res.setHeader('Set-Cookie', cookie(PENDING_COOKIE, claim, '/api/pair', PENDING_MS / 1000));
+      return send(res, 202, publicPending(pending));
+    }
+
+    if (method === 'GET' && path === '/api/pair/status') {
+      if (!ctx.remote) throw new HttpError(400, 'Pairing happens on the phone.');
+      const claim = readCookie(req, PENDING_COOKIE);
+      const file = loadDevices(cfg.home);
+      const pruned = pruneDevices(file);
+      const p = claim ? findByHash(file.pending, claim, (x) => x.claimHash) : null;
+      if (!p || p.tailscaleLogin !== ctx.login) {
+        if (pruned) saveDevices(cfg.home, file);
+        return send(res, 200, { state: 'expired' });
+      }
+      if (p.state === 'waiting') {
+        if (pruned) saveDevices(cfg.home, file);
+        return send(res, 200, { state: 'waiting', name: p.name, tailscaleLogin: p.tailscaleLogin });
+      }
+      file.pending = file.pending.filter((x) => x !== p);
+      const clearPending = cookie(PENDING_COOKIE, '', '/api/pair', 0);
+      if (p.state === 'denied') {
+        saveDevices(cfg.home, file);
+        res.setHeader('Set-Cookie', clearPending);
+        return send(res, 200, { state: 'denied' });
+      }
+      const secret = newSecret();
+      const now = Date.now();
+      const device: Device = {
+        id: newDeviceId(),
+        name: p.name,
+        tailscaleLogin: p.tailscaleLogin,
+        secretHash: hashSecret(secret),
+        scopes: [...DEFAULT_SCOPES],
+        createdAt: new Date(now).toISOString(),
+        lastSeenAt: new Date(now).toISOString(),
+        expiresAt: idleExpiry(now, loadSettings(cfg.home).phone.deviceIdleDays),
+      };
+      file.devices.push(device);
+      saveDevices(cfg.home, file);
+      appendAudit(cfg.home, { action: 'pair-claimed', deviceId: device.id, pendingId: p.id, login: device.tailscaleLogin });
+      broadcast('devices', devicesView(), { localOnly: true });
+      res.setHeader('Set-Cookie', [cookie(DEVICE_COOKIE, secret, '/', DEVICE_COOKIE_MAX_AGE), clearPending]);
+      return send(res, 200, { state: 'approved', device: publicDevice(device) });
+    }
+
+    // ── Devices, on this computer ──
+    if (method === 'POST' && path === '/api/pair/code') {
+      if (!phoneHost) throw new HttpError(409, 'Phone mode is off. Start ContextDeck with `contextdeck ui --phone`.');
+      const { code, expiresAt } = codes.create();
+      return send(res, 200, { code, url: `https://${phoneHost}/pair#${code}`, expiresAt });
+    }
+
+    if (method === 'GET' && path === '/api/devices') return send(res, 200, devicesView());
+
+    if (method === 'POST' && path.startsWith('/api/devices/pending/')) {
+      const id = decodeURIComponent(path.slice('/api/devices/pending/'.length));
+      const body = (await readBody(req)) as { allow?: unknown } | null;
+      if (!body || typeof body.allow !== 'boolean') throw new HttpError(400, 'Expected {"allow": true|false}.');
+      const file = loadDevices(cfg.home);
+      pruneDevices(file);
+      const p = isPendingId(id) ? file.pending.find((x) => x.id === id && x.state === 'waiting') : undefined;
+      if (!p) throw new HttpError(404, 'That pairing request has expired or was already answered.');
+      p.state = body.allow ? 'approved' : 'denied';
+      saveDevices(cfg.home, file);
+      appendAudit(cfg.home, { action: body.allow ? 'pair-approved' : 'pair-denied', pendingId: p.id, login: p.tailscaleLogin });
+      broadcast('devices', devicesView(), { localOnly: true });
+      return send(res, 200, publicPending(p));
+    }
+
+    if (method === 'PUT' && path.startsWith('/api/devices/')) {
+      const id = decodeURIComponent(path.slice('/api/devices/'.length));
+      const body = (await readBody(req)) as { scopes?: unknown } | null;
+      const scopes = body?.scopes;
+      if (!Array.isArray(scopes) || !scopes.every(isScope) || !scopes.includes('view')) {
+        throw new HttpError(400, 'Expected {"scopes": [...]} with known scopes, including "view".');
+      }
+      const file = loadDevices(cfg.home);
+      const d = isDeviceId(id) ? file.devices.find((x) => x.id === id) : undefined;
+      if (!d) throw new HttpError(404, 'No such device.');
+      d.scopes = [...new Set(scopes)];
+      saveDevices(cfg.home, file);
+      appendAudit(cfg.home, { action: 'device-scopes', deviceId: d.id, scopes: d.scopes });
+      broadcast('devices', devicesView(), { localOnly: true });
+      return send(res, 200, publicDevice(loadDevices(cfg.home).devices.find((x) => x.id === id)!));
+    }
+
+    if (method === 'DELETE' && path.startsWith('/api/devices/')) {
+      const id = decodeURIComponent(path.slice('/api/devices/'.length));
+      if (id !== 'all' && !isDeviceId(id)) throw new HttpError(404, 'No such device.');
+      const revoked = revokeDevices(cfg.home, id);
+      if (id !== 'all' && !revoked.length) throw new HttpError(404, 'No such device.');
+      for (const r of revoked) appendAudit(cfg.home, { action: 'device-revoked', deviceId: r });
+      closeStaleStreams(revoked);
+      broadcast('devices', devicesView(), { localOnly: true });
+      return send(res, 200, { revoked });
+    }
+
     if (method === 'GET' && path === '/api/events') {
       res.writeHead(200, {
         'Content-Type': 'text/event-stream; charset=utf-8',
@@ -630,7 +918,7 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
         'X-Content-Type-Options': 'nosniff',
       });
       res.write(`event: hello\ndata: ${JSON.stringify({ version })}\n\n`);
-      clients.add(res);
+      clients.set(res, ctx.device?.id ?? null);
       req.on('close', () => clients.delete(res));
       return;
     }
@@ -639,7 +927,20 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
   };
 
   const server: Server = createServer((req, res) => {
-    handle(req, res).catch((err: unknown) => {
+    let ctx: RequestContext | null = null;
+    // Every write a paired device makes goes in the audit log: route and outcome only
+    res.on('finish', () => {
+      if (ctx?.device && req.method !== 'GET' && req.method !== 'HEAD') {
+        const route = new URL(req.url ?? '/', 'http://x').pathname;
+        appendAudit(cfg.home, { action: 'write', deviceId: ctx.device.id, method: req.method, route, status: res.statusCode });
+      }
+    });
+    Promise.resolve()
+      .then(() => {
+        ctx = requestContext(req);
+        return handle(req, res, ctx);
+      })
+      .catch((err: unknown) => {
       const status = err instanceof HttpError ? err.status : 500;
       const message = err instanceof Error ? err.message : String(err);
       if (!res.headersSent) send(res, status, { error: message });
@@ -684,8 +985,10 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
   const stopMeaningEvents = meaning.onChange((status) => broadcast('semantic', status));
   meaning.kick();
   const heartbeat = setInterval(() => {
-    for (const res of clients) res.write(': keep-alive\n\n');
+    for (const res of clients.keys()) res.write(': keep-alive\n\n');
   }, 25_000);
+  // Revoking from the CLI, or a device expiring, closes its streams within a second
+  const sweep = phoneHost ? setInterval(() => closeStaleStreams(), 1000) : null;
 
   return {
     url: `http://127.0.0.1:${port}/`,
@@ -694,10 +997,11 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
     close: () =>
       new Promise<void>((resolve) => {
         clearInterval(heartbeat);
+        if (sweep) clearInterval(sweep);
         watcher?.close();
         stopMeaningEvents();
         meaning.stop();
-        for (const res of clients) res.end();
+        for (const res of clients.keys()) res.end();
         clients.clear();
         server.close(() => resolve());
         server.closeAllConnections?.();
