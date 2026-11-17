@@ -61,6 +61,10 @@
         <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M12 7 A5 5 0 1 1 10.5 3.4"></path><path d="M10.8 1.2 L10.8 3.8 L8.2 3.8"></path></svg>
         <span>Rescan</span>
       </button>
+      <button type="button" class="pill solid" id="needs-btn" aria-haspopup="dialog" hidden>
+        <span>Needs you</span>
+        <span class="needs-n">0</span>
+      </button>
       <button type="button" class="pill outline" id="phones-btn" aria-haspopup="dialog" hidden>
         <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><rect x="4" y="1.5" width="6" height="11" rx="1.2"></rect><path d="M6.3 10.5 H7.7"></path></svg>
         <span>Phones</span>
@@ -114,6 +118,7 @@
 
     <div id="composer" class="scrim" hidden></div>
     <div id="phones" class="scrim" hidden></div>
+    <div id="needs" class="scrim" hidden></div>
   </main>
 
   <section id="pair-ask" class="pair-ask" aria-labelledby="pair-ask-title" aria-live="polite" hidden></section>

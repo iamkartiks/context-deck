@@ -229,7 +229,8 @@ contextdeck ui --phone
 | | |
 |---|---|
 | **What a phone can do** | Browse, search and read sessions, follow agents at work, and mark or edit decisions. |
-| **Setting agents to work** | If you allow it under **Phones**: hand a session off to an agent, or send a session a message. The agent runs on your computer, in the session's folder, and the phone shows what it's doing live, with **Stop**. |
+| **Setting agents to work** | If you allow it under **Phones**: hand a session off to an agent, or send a session a message from the box at the bottom of the session. The agent runs on your computer, in the session's folder, and its reply shows in the conversation as it works, with **Stop**. |
+| **Needs you** | Requests waiting for your answer, from every session, with a count in the header. |
 | **Plan only, ask me first, or edit** | Each run is **Plan only** (it reads and suggests, and changes nothing) unless you allow more for that phone. **Ask me first** (Claude Code): the agent may edit and run commands, but every request shows up as a card with the command or the change, and waits for **Allow once** or **Deny**. Unanswered requests are denied after 10 minutes. **Edit files in <folder>**: it may change files there without asking. Nothing a phone sends can turn off an agent's permission checks. |
 | **Where agents run** | Only in folders where you've used that tool yourself, because Claude Code runs a folder's hooks and MCP servers without asking in this mode. Codex also runs in other folders you've worked in, since it checks project trust itself. |
 | **What it can't** | Open terminals, rescan, move cards or change settings. Those stay on the computer. |

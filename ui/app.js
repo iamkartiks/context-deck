@@ -250,6 +250,10 @@ const state = {
   runEvents: new Map(), // run id → its events, for runs being shown
   openRun: null, // the run expanded in the reader
   approvals: new Map(), // approval id → a request waiting for an answer (if this page may answer)
+  needsOpen: false, // the "Needs you" list: { returnFocus } while open
+  sentPrompts: new Map(), // run id → the message sent from this page (memory only, for the chat)
+  endedSeen: new Map(), // run id → when this page saw it end (its reply shows until the session reloads)
+  detailAt: 0, // when the open session was last loaded
 };
 
 /** What this page may do (a phone sees only what its scopes allow). */
@@ -281,6 +285,8 @@ const els = {
   phonesBtn: $('#phones-btn'),
   phones: $('#phones'),
   pairAsk: $('#pair-ask'),
+  needsBtn: $('#needs-btn'),
+  needs: $('#needs'),
 };
 
 let toastTimer = 0;
@@ -1236,6 +1242,7 @@ async function select(id, { focusReader = true, seq: target = null, keepPlace = 
     const detail = await api(`/api/session/${encodeURIComponent(id)}${around != null ? `?around=${around}` : ''}`);
     if (seq !== detailSeq) return;
     state.detail = detail;
+    state.detailAt = Date.now();
     if (changed) state.find = state.search ? { q: state.search.q, matches: null, index: -1 } : null;
     renderReader({ keepScroll: keepPlace && !changed ? scroll : null });
     if (focusReader && changed) els.reader.focus({ preventScroll: true });
@@ -1345,6 +1352,7 @@ async function jumpTo(seq, { load = true } = {}) {
       const detail = await api(`/api/session/${encodeURIComponent(id)}?around=${seq}`);
       if (run !== detailSeq) return;
       state.detail = detail;
+      state.detailAt = Date.now();
       renderReader({ keepScroll: els.reader.scrollTop });
       paintFind();
     } catch (err) {
@@ -1913,7 +1921,13 @@ function renderReader({ keepScroll = null } = {}) {
     if (!decidedAt.has(x.seq)) decidedAt.set(x.seq, []);
     decidedAt.get(x.seq).push(x);
   }
-  const convo = h('div', { class: `convo${state.showTools ? '' : ' hide-tools'}` }, d.messages.map((m) => messageEl(m, tool, decidedAt.get(m.seq))));
+  // Messages a run is showing live at the end are left out here until it's done
+  const cut = chatCut(sess.id);
+  const convo = h(
+    'div',
+    { class: `convo${state.showTools ? '' : ' hide-tools'}` },
+    d.messages.filter((m) => !(cut && m.ts && Date.parse(m.ts) >= cut)).map((m) => messageEl(m, tool, decidedAt.get(m.seq))),
+  );
 
   const decisions = d.decisions?.length
     ? h(
@@ -1988,6 +2002,7 @@ function renderReader({ keepScroll = null } = {}) {
           'Back',
         ),
         h('span', { class: 'tool-tag', title: sess.cliVersion ? `version ${sess.cliVersion}` : null }, swatch(sess.provider), tool),
+        needsButton(),
         h(
           'button',
           { type: 'button', class: 'close', 'aria-label': 'Close details', onclick: closeReader },
@@ -2042,11 +2057,15 @@ function renderReader({ keepScroll = null } = {}) {
         d.messages.length ? find : null,
         windowNote,
         d.messages.length ? convo : h('p', { class: 'note' }, 'No messages were recorded for this session.'),
+        chatTurns(sess.id),
       ),
     ),
+    canMessage(sess) ? chatBar(sess) : null,
   );
   els.reader.hidden = false;
   els.reader.scrollTop = keepScroll ?? 0;
+  // Opening a session that's being answered: start at the reply
+  if (keepScroll == null && chatRunsFor(sess.id).length) els.reader.scrollTop = els.reader.scrollHeight;
   updateFindCount();
   if (findFocus != null) {
     const input = $('.find-input', els.reader);
@@ -2102,15 +2121,15 @@ function elapsed(run) {
  * Plan only; or, if this page may, edit files in the folder (named in full),
  * or ask first (tools that can send their permission requests here).
  */
-function modePicker(cwd, provider) {
+function modePicker(cwd, provider, initial = 'plan', onChange = null) {
   const name = `run-mode-${++runPickers}`;
   const tool = runCaps().tools.find((t) => t.id === provider);
-  const plan = h('input', { type: 'radio', name, value: 'plan', checked: true });
-  const edit = runCaps().edit ? h('input', { type: 'radio', name, value: 'edit' }) : null;
-  const ask = runCaps().ask && tool?.ask ? h('input', { type: 'radio', name, value: 'ask' }) : null;
+  const edit = runCaps().edit ? h('input', { type: 'radio', name, value: 'edit', checked: initial === 'edit' }) : null;
+  const ask = runCaps().ask && tool?.ask ? h('input', { type: 'radio', name, value: 'ask', checked: initial === 'ask' }) : null;
+  const plan = h('input', { type: 'radio', name, value: 'plan', checked: !edit?.checked && !ask?.checked });
   const el = h(
     'fieldset',
-    { class: 'mode-picker' },
+    { class: 'mode-picker', onchange: () => onChange?.(value()) },
     h('legend', { class: 'visually-hidden' }, 'What the agent may do'),
     h('label', {}, plan, h('span', {}, h('strong', {}, 'Plan only'), ' (no changes)')),
     ask ? h('label', {}, ask, h('span', {}, h('strong', {}, 'Ask me first'), ': it may edit and run commands in ', h('code', {}, cwd), ' after you allow each one')) : null,
@@ -2118,7 +2137,8 @@ function modePicker(cwd, provider) {
     runCaps().ask && tool && !tool.ask ? h('p', { class: 'note' }, `${tool.label} can’t ask for approval here. Choose Plan only${edit ? ' or Edit this folder' : ''}.`) : null,
     !edit && !ask && isPhone() ? h('p', { class: 'note' }, 'This phone can start Plan only runs. More can be allowed on your computer, under Phones.') : null,
   );
-  return { el, value: () => (edit?.checked ? 'edit' : ask?.checked ? 'ask' : 'plan') };
+  const value = () => (edit?.checked ? 'edit' : ask?.checked ? 'ask' : 'plan');
+  return { el, value };
 }
 
 const modeLabel = (run) => (run.mode === 'edit' ? `Edit files in ${run.cwd}` : run.mode === 'ask' ? `Asks before changes in ${run.cwd}` : 'Plan only');
@@ -2129,6 +2149,7 @@ const modeLabel = (run) => (run.mode === 'edit' ? `Edit files in ${run.cwd}` : r
 
 function setApprovals(list) {
   state.approvals = new Map(list.map((a) => [a.id, a]));
+  renderNeeds();
   refreshRuns();
 }
 
@@ -2136,8 +2157,10 @@ function onApproval({ approval, change }) {
   if (change === 'asked') {
     state.approvals.set(approval.id, approval);
     const run = state.runs.get(approval.runId);
-    toast(`${run?.providerLabel ?? 'An agent'} is asking to use ${approval.tool}. Open the session to answer.`);
+    // Already looking at it: the card is in the conversation
+    if (!run?.sessionId || run.sessionId !== state.selected) toast(`${run?.providerLabel ?? 'An agent'} is asking to use ${approval.tool}. It’s under Needs you.`);
   } else state.approvals.delete(approval.id);
+  renderNeeds();
   refreshRuns();
 }
 
@@ -2145,11 +2168,128 @@ async function answerApproval(a, allow) {
   try {
     await api(`/api/approvals/${encodeURIComponent(a.id)}`, { method: 'POST', body: { allow } });
     state.approvals.delete(a.id);
-    refreshRuns();
   } catch (err) {
     toast(err.message);
+    // Answered elsewhere, or it timed out: show what's still waiting
+    if (caps().approve) api('/api/approvals').then((r) => setApprovals(r.approvals), () => {});
   }
+  renderNeeds();
+  refreshRuns();
 }
+
+// ── Needs you ──
+// Every request waiting for an answer, from any session, in one list.
+
+const waitingApprovals = () => [...state.approvals.values()].sort((a, b) => a.expiresAt.localeCompare(b.expiresAt));
+
+/** The count, in the header, in the open session's header, and in the tab title. */
+function renderNeeds() {
+  const n = caps().approve ? state.approvals.size : 0;
+  els.needsBtn.hidden = !n;
+  $('.needs-n', els.needsBtn).textContent = String(n);
+  const label = n ? `Needs you: ${plural(n, 'request')} waiting for an answer` : 'Needs you';
+  els.needsBtn.setAttribute('aria-label', label);
+  els.needsBtn.title = label;
+  const inReader = $('.reader-needs', els.reader);
+  if (inReader) inReader.replaceWith(needsButton());
+  document.title = n ? `(${n}) ContextDeck` : 'ContextDeck';
+  if (state.needsOpen) renderNeedsDialog();
+}
+
+/** The same button in the open session's header (on a phone the session covers the page header). */
+function needsButton() {
+  const n = caps().approve ? state.approvals.size : 0;
+  return h(
+    'button',
+    { type: 'button', class: 'pill solid small reader-needs', hidden: !n, 'aria-haspopup': 'dialog', 'aria-label': `Needs you: ${plural(n, 'request')} waiting for an answer`, onclick: openNeeds },
+    'Needs you',
+    h('span', { class: 'needs-n' }, String(n)),
+  );
+}
+
+function openNeeds() {
+  state.needsOpen = { returnFocus: document.activeElement };
+  renderNeedsDialog();
+  els.needs.hidden = false;
+  setBackgroundInert(true);
+  $('.close', els.needs)?.focus({ preventScroll: true });
+}
+
+function closeNeeds() {
+  if (!state.needsOpen) return;
+  const back = state.needsOpen.returnFocus;
+  state.needsOpen = false;
+  setBackgroundInert(false);
+  els.needs.hidden = true;
+  els.needs.replaceChildren();
+  if (back?.isConnected && !back.closest('[hidden]')) back.focus({ preventScroll: true });
+}
+
+function renderNeedsDialog() {
+  const list = waitingApprovals();
+  els.needs.replaceChildren(
+    h(
+      'section',
+      { class: 'composer phones-dialog needs-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'needs-title' },
+      h(
+        'div',
+        { class: 'composer-head' },
+        h('div', {}, h('div', { class: 'label' }, 'Agents asking'), h('h2', { id: 'needs-title' }, 'Needs you')),
+        h(
+          'button',
+          { type: 'button', class: 'close', 'aria-label': 'Close', onclick: closeNeeds },
+          (() => {
+            const svg = s('svg', { width: 12, height: 12, viewBox: '0 0 12 12', 'aria-hidden': 'true' });
+            svg.append(s('path', { d: 'M2 2 L10 10 M10 2 L2 10' }));
+            return svg;
+          })(),
+        ),
+      ),
+      list.length
+        ? h(
+            'ul',
+            { class: 'needs-list' },
+            list.map((a) => {
+              const run = state.runs.get(a.runId);
+              const sess = run?.sessionId ? state.byId.get(run.sessionId) : null;
+              return h(
+                'li',
+                {},
+                h(
+                  'p',
+                  { class: 'needs-from' },
+                  run ? swatch(run.provider) : null,
+                  h('strong', {}, run?.providerLabel ?? 'An agent'),
+                  sess ? ` · ${shortTitle(sess.title, 60)}` : ` · ${folderName(a.cwd)}`,
+                ),
+                approvalCard(a),
+                sess
+                  ? h(
+                      'button',
+                      {
+                        type: 'button',
+                        class: 'text-button',
+                        onclick: () => {
+                          closeNeeds();
+                          select(sess.id);
+                        },
+                      },
+                      'Open the session',
+                    )
+                  : null,
+              );
+            }),
+          )
+        : h('p', { class: 'note' }, 'Nothing needs you right now.'),
+    ),
+  );
+}
+
+els.needsBtn.addEventListener('click', openNeeds);
+trapTab(els.needs);
+els.needs.addEventListener('pointerdown', (e) => {
+  if (e.target === els.needs) closeNeeds();
+});
 
 /** One request: what it wants to do, where, and Allow once / Deny. */
 function approvalCard(a) {
@@ -2202,14 +2342,28 @@ async function loadRunEvents(id) {
   }
 }
 
-function setRuns(list) {
+/** The server's list of runs, on load and after reconnecting (events may have been missed meanwhile). */
+function syncRuns(list) {
+  const before = state.runs;
   state.runs = new Map(list.map((r) => [r.id, r]));
-  for (const r of list) if (isLive(r)) loadRunEvents(r.id);
+  for (const r of list) {
+    const was = before.get(r.id);
+    if (was && isLive(was) && !isLive(r)) {
+      state.endedSeen.set(r.id, Date.now());
+      afterChatRun(r);
+    }
+    // Live ones, and ones on screen that changed: fetch what they did in full
+    if (isLive(r) || (state.runEvents.has(r.id) && was?.state !== r.state)) loadRunEvents(r.id);
+  }
 }
 
 function upsertRun(run) {
   const before = state.runs.get(run.id);
   state.runs.set(run.id, run);
+  if (before && isLive(before) && !isLive(run)) {
+    state.endedSeen.set(run.id, Date.now());
+    afterChatRun(run);
+  }
   if (!before) {
     state.runEvents.set(run.id, state.runEvents.get(run.id) ?? []);
     // On this computer, say when a phone starts something
@@ -2237,24 +2391,191 @@ async function stopRun(run) {
   }
 }
 
-/** The reader's "Work on it" section: send a message, and the runs for this session. */
+/** Whether this page may send the session a message (the box at the bottom of the reader). */
+const canMessage = (sess) => runCaps().run && canRunTool(sess.provider) && !sess.isSubagent && !!sess.cwd;
+
+/** The reader's "Work on it" section: handoffs and earlier runs. Messages show in the conversation. */
 function workSection(sess) {
-  const canSend = runCaps().run && canRunTool(sess.provider) && !sess.isSubagent && !!sess.cwd;
   const list = h('div', { class: 'run-list' });
-  const el = h('section', { class: 'section work', dataset: { session: sess.id } }, h('div', { class: 'label' }, 'Work on it'), canSend ? messageForm(sess) : null, list);
+  const el = h('section', { class: 'section work', dataset: { session: sess.id } }, h('div', { class: 'label' }, 'Work on it'), list);
   fillRunList(list, sess.id);
-  el.hidden = !canSend && !list.childElementCount;
+  el.hidden = !list.childElementCount;
   return el;
 }
 
-function messageForm(sess) {
+// ── Chat ──
+// A message sent to a session shows at the end of its conversation, with the
+// reply as it streams in, until the session is read again with the new turn.
+
+/** Message runs shown in the conversation: live ones, and ones that ended since it was loaded. */
+function chatRunsFor(sessionId) {
+  const d = state.detail;
+  if (d?.session.id !== sessionId) return [];
+  return [...state.runs.values()]
+    .filter((r) => r.kind === 'resume' && r.sessionId === sessionId && (isLive(r) || (state.endedSeen.get(r.id) ?? 0) > state.detailAt))
+    .sort((a, b) => a.queuedAt.localeCompare(b.queuedAt));
+}
+
+/** When the first run shown at the end started: saved messages from then on are its turn. */
+function chatCut(sessionId) {
+  const started = chatRunsFor(sessionId)
+    .map((r) => (r.startedAt ? Date.parse(r.startedAt) : NaN))
+    .filter((t) => !Number.isNaN(t));
+  return started.length ? Math.min(...started) : 0;
+}
+
+/** The message a run was sent, from the saved session (when it wasn't sent from this page). */
+function savedPrompt(run) {
+  const from = run.startedAt ? Date.parse(run.startedAt) : NaN;
+  const d = state.detail;
+  if (Number.isNaN(from) || d?.session.id !== run.sessionId) return undefined;
+  const until = run.endedAt ? Date.parse(run.endedAt) : Infinity;
+  return d.messages.find((m) => m.role === 'user' && m.ts && Date.parse(m.ts) >= from && Date.parse(m.ts) <= until)?.text;
+}
+
+const MODE_SHORT = { plan: 'Plan only', ask: 'Asks first', edit: 'Can edit' };
+
+/** The end of the conversation: what's been sent and the replies so far. */
+function chatTurns(sessionId) {
+  const el = h('div', { class: 'chat-turns', dataset: { session: sessionId }, 'aria-live': 'polite' });
+  fillChatTurns(el, sessionId);
+  return el;
+}
+
+function fillChatTurns(el, sessionId) {
+  const runs = chatRunsFor(sessionId);
+  if (runs.length && state.detail?.truncatedAfter) {
+    // Showing an older part of a long session: the new turn is at the end
+    el.replaceChildren(
+      h('button', { type: 'button', class: 'pill outline small', onclick: () => select(sessionId, { focusReader: false }).then(toBottom) }, runs.some(isLive) ? 'Follow the reply' : 'Go to the latest messages'),
+    );
+    return;
+  }
+  el.replaceChildren(...runs.map(chatTurn));
+}
+
+/** Reply text as messages show it (with code blocks), tool calls as short lines. */
+function replyBody(events) {
+  const out = [];
+  let text = '';
+  const flush = () => {
+    if (text) out.push(h('div', { class: 'reply-text' }, messageBody(text.replace(/^\n+/, ''))));
+    text = '';
+  };
+  for (const e of events.slice(-400)) {
+    if (e.type === 'text') {
+      if (e.start && text) text += '\n\n';
+      text += e.delta;
+      continue;
+    }
+    flush();
+    if (e.type === 'tool') out.push(h('p', { class: 'run-tool' }, h('span', { class: 'run-tool-name' }, e.name), e.summary ? ` ${e.summary}` : ''));
+    else if (e.type === 'denied') out.push(h('p', { class: 'run-denied' }, `${e.tool}: ${e.reason}`));
+    else if (e.type === 'error') out.push(h('p', { class: 'run-error' }, e.message));
+  }
+  flush();
+  return out;
+}
+
+/** Session id → a message being sent from this page (its run can be announced before the reply to sending it). */
+const sending = new Map();
+
+function chatTurn(run) {
+  const mine = run.startedBy.deviceId === (caps().device?.id ?? null);
+  const pending = mine ? sending.get(run.sessionId) : null;
+  const prompt = state.sentPrompts.get(run.id) ?? (pending && !pending.known.has(run.id) ? pending.text : undefined) ?? savedPrompt(run);
+  const events = state.runEvents.get(run.id);
+  if (!events) loadRunEvents(run.id);
+  const asking = [...state.approvals.values()].filter((a) => a.runId === run.id);
+  const reply = events ? replyBody(events) : [];
+  const live = isLive(run);
+  const status = live
+    ? h(
+        'p',
+        { class: 'chat-working' },
+        h('span', { class: `run-chip ${run.state}` }, run.state === 'queued' ? 'Waiting' : asking.length ? 'Needs you' : 'Working…'),
+        run.state === 'running' ? h('span', { class: 'run-time', dataset: { runTime: run.id } }, elapsed(run)) : h('span', { class: 'note' }, 'Starts when the run before it finishes'),
+        canStopRuns() ? h('button', { type: 'button', class: 'text-button', onclick: () => stopRun(run) }, run.state === 'queued' ? 'Cancel' : 'Stop') : null,
+      )
+    : run.state !== 'done' && run.reason
+      ? h('p', { class: run.state === 'failed' ? 'warn' : 'note' }, run.reason)
+      : null;
+  return h(
+    'div',
+    { class: `chat-turn ${run.state}`, dataset: { run: run.id } },
+    h(
+      'div',
+      { class: 'msg user live' },
+      h('div', { class: 'who' }, prompt != null ? 'You' : run.startedBy.name, h('time', { datetime: run.queuedAt, title: fullDate(run.queuedAt) }, ago(run.queuedAt))),
+      h('div', { class: 'body' }, prompt != null ? messageBody(prompt) : h('span', { class: 'note' }, 'Sent from another screen. The message shows here once the reply is saved.')),
+    ),
+    run.state === 'queued' && !reply.length
+      ? status
+      : h(
+          'div',
+          { class: 'msg assistant live' },
+          h('div', { class: 'who' }, run.providerLabel, h('span', { class: 'chat-mode' }, MODE_SHORT[run.mode] ?? run.mode)),
+          reply.length ? h('div', { class: 'body' }, reply) : live ? h('p', { class: 'note' }, events ? 'Starting…' : 'Loading…') : null,
+          asking.map(approvalCard),
+          status,
+        ),
+  );
+}
+
+/** Message runs for this session that haven't finished, for the line above the box. */
+function busyFor(sessionId) {
+  return [...state.runs.values()].filter((r) => r.kind === 'resume' && r.sessionId === sessionId && isLive(r));
+}
+
+function fillChatStatus(el, sessionId) {
+  const busy = busyFor(sessionId);
+  const running = busy.find((r) => r.state === 'running');
+  const waiting = busy.filter((r) => r.state === 'queued').length;
+  el.hidden = !busy.length;
+  if (!busy.length) return el.replaceChildren();
+  el.replaceChildren(
+    h('span', { class: 'chat-dot', 'aria-hidden': 'true' }),
+    h(
+      'span',
+      {},
+      running ? `${running.providerLabel} is working` : 'Waiting to start',
+      waiting && running ? ` · ${waiting} more waiting` : waiting > 1 ? ` · ${waiting} messages` : '',
+      '. A new message waits its turn.',
+    ),
+    running && canStopRuns() ? h('button', { type: 'button', class: 'text-button', onclick: () => stopRun(running) }, 'Stop') : null,
+  );
+}
+
+/** Keep the conversation's end in view while a reply streams in, if you were already there. */
+function nearBottom() {
+  const r = els.reader;
+  return r.scrollHeight - r.scrollTop - r.clientHeight < 80;
+}
+function toBottom() {
+  requestAnimationFrame(() => (els.reader.scrollTop = els.reader.scrollHeight));
+}
+
+/** The mode each session's box was last set to, while this page is open. */
+const chatModes = new Map();
+
+/** The message box at the bottom of the reader. */
+function chatBar(sess) {
+  const tool = toolLabel(sess.provider);
+  const grow = () => {
+    ta.style.height = 'auto';
+    ta.style.height = `${Math.min(ta.scrollHeight + 2, 168)}px`;
+  };
   const ta = h('textarea', {
     class: 'run-input',
     id: 'run-input',
-    rows: 3,
+    rows: 1,
     maxlength: 200000,
-    placeholder: `Tell ${toolLabel(sess.provider)} what to do next`,
-    oninput: () => messageDrafts.set(sess.id, ta.value),
+    placeholder: `Message ${tool}`,
+    'aria-label': `Message for ${tool}`,
+    oninput: () => {
+      messageDrafts.set(sess.id, ta.value);
+      grow();
+    },
     onkeydown: (e) => {
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
@@ -2263,46 +2584,67 @@ function messageForm(sess) {
     },
   });
   ta.value = messageDrafts.get(sess.id) ?? '';
-  const mode = modePicker(sess.cwd, sess.provider);
+  if (ta.value) requestAnimationFrame(grow);
+  const summary = h('summary', {});
+  const showMode = (m) => {
+    summary.replaceChildren(m === 'edit' ? `Edit files in ${folderName(sess.cwd)}` : m === 'ask' ? 'Ask me first' : 'Plan only', h('span', { class: 'visually-hidden' }, ': change what the agent may do'));
+  };
+  const mode = modePicker(sess.cwd, sess.provider, chatModes.get(sess.id) ?? 'plan', (m) => {
+    chatModes.set(sess.id, m);
+    showMode(m);
+  });
+  showMode(mode.value());
+  const status = h('div', { class: 'chat-status', 'aria-live': 'polite' });
+  fillChatStatus(status, sess.id);
+  const send = h('button', { type: 'submit', class: 'pill solid' }, 'Send');
   const form = h(
     'form',
     {
-      class: 'run-form',
+      class: 'chat-bar run-form',
+      dataset: { session: sess.id },
       onsubmit: async (e) => {
         e.preventDefault();
-        if (!ta.value.trim()) return toast('Write a message first.');
-        const btn = $('button[type=submit]', form);
-        btn.disabled = true;
+        const text = ta.value;
+        if (!text.trim()) return toast('Write a message first.');
+        send.disabled = true;
+        sending.set(sess.id, { text, known: new Set(state.runs.keys()) });
         try {
-          const run = await api('/api/runs', { method: 'POST', body: { kind: 'resume', sessionId: sess.id, mode: mode.value(), prompt: ta.value } });
+          const run = await api('/api/runs', { method: 'POST', body: { kind: 'resume', sessionId: sess.id, mode: mode.value(), prompt: text } });
+          sending.delete(sess.id);
+          state.sentPrompts.set(run.id, text);
           messageDrafts.delete(sess.id);
           ta.value = '';
-          state.openRun = run.id;
+          grow();
           upsertRun(run);
-          toast(run.state === 'queued' ? 'Waiting for the run before it to finish.' : `Sent. ${toolLabel(sess.provider)} is working on your computer.`);
+          toBottom();
+          if (run.state === 'queued') toast('Sent. It starts when the run before it finishes.');
         } catch (err) {
+          sending.delete(sess.id);
           toast(err.message);
         } finally {
-          btn.disabled = false;
+          send.disabled = false;
         }
       },
     },
-    h('label', { class: 'visually-hidden', for: 'run-input' }, `Message for ${toolLabel(sess.provider)}`),
-    ta,
-    mode.el,
-    h(
-      'div',
-      { class: 'actions' },
-      h('button', { type: 'submit', class: 'pill solid' }, 'Send'),
-      h('span', { class: 'note' }, isPhone() ? 'Runs on your computer.' : 'Runs here, in the background.'),
-    ),
+    status,
+    h('div', { class: 'chat-row' }, ta, send),
+    h('details', { class: 'chat-mode-picker' }, summary, mode.el),
+    h('p', { class: 'note chat-where' }, isPhone() ? 'Runs on your computer.' : 'Runs here, in the background. ⌘ or Ctrl+Enter sends.'),
   );
   return form;
 }
 
 function fillRunList(list, sessionId) {
-  const runs = runsFor(sessionId).slice(0, 5);
-  const open = runs.find((r) => [...state.approvals.values()].some((a) => a.runId === r.id)) ?? runs.find((r) => r.id === state.openRun) ?? runs.find(isLive) ?? runs[0];
+  const inChat = new Set(chatRunsFor(sessionId).map((r) => r.id));
+  const runs = runsFor(sessionId)
+    .filter((r) => !inChat.has(r.id))
+    .slice(0, 5);
+  // A message's reply is in the conversation once it's saved, so earlier messages start folded
+  const open =
+    runs.find((r) => [...state.approvals.values()].some((a) => a.runId === r.id)) ??
+    runs.find((r) => r.id === state.openRun) ??
+    runs.find(isLive) ??
+    runs.find((r) => r.kind !== 'resume');
   const log = $('.run-log', list);
   const atBottom = !log || log.scrollHeight - log.scrollTop - log.clientHeight < 40;
   list.replaceChildren(...runs.map((r) => runEl(r, r === open, sessionId)));
@@ -2316,11 +2658,18 @@ function refreshRuns() {
   if (runsFrame) return;
   runsFrame = requestAnimationFrame(() => {
     runsFrame = 0;
+    const stick = nearBottom();
     const work = $('.work', els.reader);
-    if (!work) return;
-    const list = $('.run-list', work);
-    fillRunList(list, work.dataset.session);
-    work.hidden = !$('.run-form', work) && !list.childElementCount;
+    if (work) {
+      const list = $('.run-list', work);
+      fillRunList(list, work.dataset.session);
+      work.hidden = !list.childElementCount;
+    }
+    const chat = $('.chat-turns', els.reader);
+    if (chat) fillChatTurns(chat, chat.dataset.session);
+    const status = $('.chat-status', els.reader);
+    if (status) fillChatStatus(status, status.closest('.chat-bar').dataset.session);
+    if (stick && chat?.childElementCount) els.reader.scrollTop = els.reader.scrollHeight;
   });
 }
 
@@ -2647,6 +2996,7 @@ function applyCapabilities() {
   body.toggle('no-rescan', c.rescan === false);
   body.toggle('no-meaning-settings', c.meaningSettings === false);
   els.phonesBtn.hidden = !c.pairPhones;
+  renderNeeds();
   if (c.device) {
     const scopes = c.device.scopes;
     const label = scopes.includes('run') || scopes.includes('handoff') ? 'can run agents' : scopes.includes('decide') ? 'can mark decisions' : 'read-only';
@@ -3030,6 +3380,7 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape') {
     if (composer) return closeComposer();
+    if (state.needsOpen) return closeNeeds();
     if (state.phonesOpen) return closePhones();
     if (!els.meaningPanel.hidden) {
       setMeaningPanel(false);
@@ -3097,20 +3448,76 @@ async function refresh() {
   const before = setBoard(board);
   if (state.search) runSearch();
   if (state.selected) {
-    const now = state.byId.get(state.selected);
-    if (now && before?.get(state.selected) !== now.updatedAt) select(state.selected, { focusReader: false, keepPlace: true });
+    const id = state.selected;
+    const now = state.byId.get(id);
+    const changed = now && before?.get(id) !== now.updatedAt;
+    // While a message is being answered, the reply shows from the run. Read the session again when it's done.
+    if (busyFor(id).length) {
+      if (changed) staleAfterRun.add(id);
+    } else if (now && (changed || staleAfterRun.has(id))) {
+      staleAfterRun.delete(id);
+      select(id, { focusReader: false, keepPlace: true });
+    }
   }
 }
 
+/** Sessions to read again once their message runs end (their new turn is in the file by then). */
+const staleAfterRun = new Set();
+
+/** A message run ended: show the saved turn once it's been read, or shortly anyway. */
+function afterChatRun(run) {
+  const id = run.sessionId;
+  if (run.kind !== 'resume' || !id || id !== state.selected) return;
+  staleAfterRun.add(id);
+  setTimeout(() => {
+    if (!staleAfterRun.has(id) || state.selected !== id || busyFor(id).length) return;
+    staleAfterRun.delete(id);
+    select(id, { focusReader: false, keepPlace: true });
+  }, 2500);
+}
+
+/**
+ * Catch up after the event stream was down (a phone that slept, a network
+ * change, ContextDeck restarted): the board, runs and requests are read again.
+ */
+let resyncing = null;
+function resync() {
+  resyncing ??= (async () => {
+    try {
+      await refresh();
+      syncRuns((await api('/api/runs')).runs);
+      if (caps().approve) setApprovals((await api('/api/approvals')).approvals);
+      else setApprovals([]);
+      render();
+      refreshRuns();
+    } catch {
+      /* the next reconnect tries again */
+    } finally {
+      resyncing = null;
+    }
+  })();
+  return resyncing;
+}
+
+let events = null;
+let streamedOnce = false;
+let hiddenAt = 0;
+let retryTimer = 0;
+
 function connectEvents() {
+  events?.close();
+  clearTimeout(retryTimer);
   let failures = 0;
-  const es = new EventSource('/api/events');
+  const es = (events = new EventSource('/api/events'));
   es.addEventListener('hello', () => {
     failures = 0;
     if (!state.connected) {
       state.connected = true;
-      refresh().catch(() => {});
+      renderHeader();
     }
+    // The first stream follows the page load; any later one may have missed events
+    if (streamedOnce) resync();
+    streamedOnce = true;
   });
   es.addEventListener('index', () => refresh().catch(() => {}));
   // Search by meaning: progress while catching up, and when it's turned on or off
@@ -3172,6 +3579,7 @@ function connectEvents() {
     }
   });
   es.onerror = () => {
+    if (es !== events) return;
     failures++;
     // A phone that was disconnected gets 401 from here on; api() takes it to the pairing page
     if (failures >= 2 && isPhone()) api('/api/board').catch(() => {});
@@ -3179,8 +3587,27 @@ function connectEvents() {
       state.connected = false;
       renderHeader();
     }
+    // The browser stops retrying after some errors (such as a proxy error while the computer slept): keep trying, more slowly
+    if (es.readyState === EventSource.CLOSED) {
+      clearTimeout(retryTimer);
+      retryTimer = setTimeout(() => es === events && connectEvents(), Math.min(30_000, 1000 * 2 ** Math.min(failures, 5)));
+    }
   };
 }
+
+// A phone that sleeps can keep a stream that looks open but is dead. When the
+// page is shown again after a while, start a new one; it catches up on connecting.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    hiddenAt = Date.now();
+    return;
+  }
+  if (!events) return;
+  if ((hiddenAt && Date.now() - hiddenAt > 10_000) || events.readyState !== EventSource.OPEN) connectEvents();
+});
+// Back from the browser's page cache, or the network came back
+window.addEventListener('pageshow', (e) => e.persisted && events && connectEvents());
+window.addEventListener('online', () => events && connectEvents());
 
 async function start() {
   applyCam();
@@ -3193,7 +3620,7 @@ async function start() {
     if (board.capabilities?.pairPhones) loadDevices();
     api('/api/runs')
       .then((r) => {
-        setRuns(r.runs);
+        syncRuns(r.runs);
         render();
         refreshRuns();
       })
