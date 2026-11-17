@@ -53,7 +53,9 @@ import {
 } from './devices.js';
 import { PairingCodes } from './pairing.js';
 import { qrSvg } from './qr.js';
-import { routeAccess, type RouteAccess } from './scopes.js';
+import { routeAccess, runScopes, type RouteAccess } from './scopes.js';
+import { isRunId, RunError, RunManager, type RunManagerOptions, type RunRequest } from './runs.js';
+import { ADAPTERS } from './adapters/index.js';
 import { loadSettings } from './settings.js';
 
 /**
@@ -141,6 +143,8 @@ export interface UiServerOptions {
   phone?: PhoneOptions;
   /** Pairing codes and their rate limit (tests pass their own). */
   pairing?: PairingCodes;
+  /** Run manager settings (tests use fake agents and short timeouts). */
+  runs?: Partial<Omit<RunManagerOptions, 'store' | 'sources' | 'home' | 'onChange' | 'onEvents' | 'onIndexed'>>;
   /** Called when a phone asks to pair, so the terminal can say so. */
   onPairRequest?: (request: { id: string; name: string; tailscaleLogin: string }) => void;
 }
@@ -278,6 +282,23 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
     }
   };
   const meaning = opts.meaning ?? new MeaningService(store, cfg.home);
+  const phoneSettings = loadSettings(cfg.home).phone;
+  const runs = new RunManager({
+    store,
+    sources: cfg.sources,
+    home: cfg.home,
+    timeoutMs: phoneSettings.runTimeoutMinutes * 60_000,
+    maxConcurrent: phoneSettings.maxConcurrentRuns,
+    ...opts.runs,
+    onChange: (run) => broadcast('run', run),
+    onEvents: (runId, events) => broadcast('run-event', { runId, events }),
+    onIndexed: (summary) => {
+      lastIndex = summary;
+      version++;
+      broadcast('index', { version, summary });
+      if (summary.indexed) meaning.kick();
+    },
+  });
   /** Open event streams, with the paired device each belongs to (null for this computer). */
   const clients = new Map<ServerResponse, string | null>();
   const codes = opts.pairing ?? new PairingCodes();
@@ -395,6 +416,13 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       /** Phone mode is on and this is the computer: it can pair and manage phones. */
       pairPhones: !!phoneHost && !ctx.remote,
       device: ctx.device ? { id: ctx.device.id, name: ctx.device.name, scopes: ctx.device.scopes } : null,
+      /** Runs: what this page may start, and the tools that can run without a terminal. */
+      runs: {
+        handoff: may('handoff'),
+        run: may('run'),
+        edit: may('edit'),
+        tools: ADAPTERS.filter((a) => a.headless).map((a) => ({ id: a.id, label: a.label })),
+      },
     };
   };
 
@@ -540,6 +568,11 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
     if (!ctx.device) return null;
     if (access === null) throw new HttpError(404, 'Not found.');
     if (access === 'local') throw new HttpError(403, 'That can only be done on the computer running ContextDeck.');
+    // Starting a run: the exact scopes depend on the body, checked in the handler
+    if (access === 'runs') {
+      if (!ctx.device.scopes.includes('run') && !ctx.device.scopes.includes('handoff')) throw new HttpError(403, 'This device isn’t allowed to start agents. You can change what it may do on your computer.');
+      return access;
+    }
     if (!ctx.device.scopes.includes(access)) throw new HttpError(403, 'This device isn’t allowed to do that. You can change what it may do on your computer.');
     return access;
   };
@@ -942,6 +975,48 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       return send(res, 200, { revoked });
     }
 
+    // ── Runs ──
+    if (method === 'GET' && path === '/api/runs') return send(res, 200, { runs: runs.list() });
+
+    if (method === 'GET' && path.startsWith('/api/runs/')) {
+      const id = decodeURIComponent(path.slice('/api/runs/'.length));
+      const found = isRunId(id) ? runs.get(id) : null;
+      if (!found) throw new HttpError(404, 'No such run.');
+      return send(res, 200, found);
+    }
+
+    if (method === 'POST' && path === '/api/runs') {
+      const body = (await readBody(req)) as Record<string, unknown> | null;
+      if (!body || typeof body !== 'object') throw new HttpError(400, 'Expected {"kind", "mode", …}.');
+      if (ctx.remote) {
+        const missing = runScopes(String(body.kind), String(body.mode)).filter((x) => !ctx.device!.scopes.includes(x));
+        if (missing.length) {
+          throw new HttpError(
+            403,
+            missing.includes('edit') ? 'This device may only start runs in Plan only. You can change that on your computer.' : 'This device isn’t allowed to start that. You can change what it may do on your computer.',
+          );
+        }
+      }
+      try {
+        const run = runs.start(body as unknown as RunRequest, ctx.device ? { deviceId: ctx.device.id, name: ctx.device.name } : { deviceId: null, name: 'This computer' });
+        return send(res, 202, run);
+      } catch (err) {
+        if (err instanceof RunError) throw new HttpError(err.status, err.message);
+        throw err;
+      }
+    }
+
+    if (method === 'DELETE' && path.startsWith('/api/runs/')) {
+      const id = decodeURIComponent(path.slice('/api/runs/'.length));
+      if (!isRunId(id)) throw new HttpError(404, 'No such run.');
+      try {
+        return send(res, 200, runs.cancel(id, ctx.device ? `Stopped from ${ctx.device.name}.` : 'Stopped.'));
+      } catch (err) {
+        if (err instanceof RunError) throw new HttpError(err.status, err.message);
+        throw err;
+      }
+    }
+
     if (method === 'GET' && path === '/api/events') {
       res.writeHead(200, {
         'Content-Type': 'text/event-stream; charset=utf-8',
@@ -1027,18 +1102,21 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
     port,
     token,
     pairingCode: newPairingCode,
-    close: () =>
-      new Promise<void>((resolve) => {
-        clearInterval(heartbeat);
-        if (sweep) clearInterval(sweep);
-        watcher?.close();
-        stopMeaningEvents();
-        meaning.stop();
-        for (const res of clients.keys()) res.end();
-        clients.clear();
+    close: async () => {
+      clearInterval(heartbeat);
+      if (sweep) clearInterval(sweep);
+      watcher?.close();
+      stopMeaningEvents();
+      meaning.stop();
+      // Agents get asked to stop first, so they can record the turn
+      await runs.stopAll();
+      for (const res of clients.keys()) res.end();
+      clients.clear();
+      await new Promise<void>((resolve) => {
         server.close(() => resolve());
         server.closeAllConnections?.();
-      }),
+      });
+    },
   };
 }
 

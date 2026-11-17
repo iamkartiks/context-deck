@@ -203,6 +203,7 @@ const claudeStream = ['--output-format', 'stream-json', '--verbose', '--include-
 
 export const claudeCodeHeadless: HeadlessDriver = {
   testedWith: 'Claude Code 2.1.326',
+  checksFolderTrust: false,
   continueArgs(session, mode): HeadlessCommand {
     return {
       command: bin('CONTEXTDECK_CLAUDE_BIN', 'claude'),
@@ -231,12 +232,16 @@ export const claudeCodeHeadless: HeadlessDriver = {
  *   anything the sandbox doesn't allow fails instead of waiting.
  * - Never `--dangerously-bypass-approvals-and-sandbox`, `--approve-for-me`,
  *   `danger-full-access` or `--skip-git-repo-check`.
+ * - Folder trust: Codex loads a project's `.codex/config.toml` (sandbox, MCP,
+ *   hooks) only for a trusted repository, and runs hooks only with persisted
+ *   hook trust (`--dangerously-bypass-hook-trust` overrides that; never used).
  */
 const CODEX_SANDBOX: Record<RunMode, string> = { plan: 'read-only', edit: 'workspace-write' };
 const codexConfig = (mode: RunMode) => ['-c', `sandbox_mode="${CODEX_SANDBOX[mode]}"`, '-c', 'approval_policy="never"'];
 
 export const codexHeadless: HeadlessDriver = {
   testedWith: 'codex-cli 0.167.0',
+  checksFolderTrust: true,
   continueArgs(session, mode): HeadlessCommand {
     return {
       command: bin('CONTEXTDECK_CODEX_BIN', 'codex'),
@@ -269,6 +274,7 @@ const qwenStream = ['--output-format', 'stream-json', '--include-partial-message
 
 export const qwenCodeHeadless: HeadlessDriver = {
   testedWith: 'Qwen Code 0.28.0 (options read from the package; not run)',
+  checksFolderTrust: false,
   continueArgs(session, mode): HeadlessCommand {
     return {
       command: bin('CONTEXTDECK_QWEN_BIN', 'qwen'),

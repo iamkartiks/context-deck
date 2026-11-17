@@ -122,7 +122,7 @@ Off unless turned on (`~/.contextdeck/config.json`); while off, no code path tal
 | `GET /api/matches?id=&q=` | Every matching message in one session, in order, for "find in this conversation" |
 | `GET /api/decisions` | Every decision, with where it is now and a summary of its session |
 | `POST /api/decisions` · `PUT` / `DELETE /api/decisions/:id` | Mark (optionally `replaces` an earlier one), edit (`{text}`, `{stillTrue: true}` or `{restore: true}`) and remove decisions (stored in `decisions.json`) |
-| `GET /api/events` | Server-sent events; `index` fires whenever the watcher re-indexes, `decisions` when decisions change, `semantic` with search-by-meaning progress |
+| `GET /api/events` | Server-sent events; `index` fires whenever the watcher re-indexes, `decisions` when decisions change, `semantic` with search-by-meaning progress, `run` when a run changes state and `run-event` with its output; `devices` (this computer only) when phones or pairing requests change |
 | `GET` / `PUT /api/layout` | Hand-placed card positions, stored in `board.json` (not in the index, so rebuilding the index never loses them) |
 | `POST /api/reindex` | Rescan now |
 | `POST /api/open-terminal` | Run a session's resume command in a new terminal window (501 when none is available) |
@@ -132,6 +132,9 @@ Off unless turned on (`~/.contextdeck/config.json`); while off, no code path tal
 | `POST /api/pair/code` | Phone mode, on this computer: a new pairing code, its URL and a QR code (SVG) |
 | `GET /api/devices` · `POST /api/devices/pending/:id` · `PUT` / `DELETE /api/devices/:id` | Phone mode, on this computer: list phones and waiting requests, allow or deny one, set a phone's scopes, disconnect one (or `all`) |
 | `GET /manifest.webmanifest` | The web app manifest, so a phone can add ContextDeck to its home screen |
+| `POST /api/runs` | Start a run: `{kind: "resume", sessionId, prompt, mode}`, `{kind: "new", to, cwd, prompt, mode}` or `{kind: "handoff", sessionId, to, handoffId, brief, mode}`, with `mode` `plan` or `edit` |
+| `GET /api/runs` · `GET /api/runs/:id` | Active, waiting and recent runs; one run with its events |
+| `DELETE /api/runs/:id` | Stop a run |
 
 Writes need the per-run token embedded in the page; see [SECURITY.md](../SECURITY.md) for the full model.
 
@@ -145,7 +148,21 @@ Writes need the per-run token embedded in the page; see [SECURITY.md](../SECURIT
 - **Capabilities.** `GET /api/board` says what the page may do (`capabilities`), so a phone only shows controls its scopes allow. The server checks again on every request.
 - **Tailscale.** `src/tailscale.ts` runs the `tailscale` CLI with argument lists: it reads status, sets up and removes its Serve entry, and refuses Funnel. Tests use a fake `tailscale` script (`writeFakeTailscale()` in `test/helpers.ts`).
 - **QR codes.** `src/qr.ts` draws them for the terminal and as SVG, using Project Nayuki's generator, vendored in `src/vendor/qrcodegen/` (MIT).
-- **Audit log.** `src/audit.ts` appends one line per pairing event and per phone write to `phone-audit.log`: ids, routes and outcomes only.
+- **Audit log.** `src/audit.ts` appends one line per pairing event, per run started and ended, and per phone write to `phone-audit.log`: ids, routes and outcomes only.
+
+### Runs (`src/runs.ts`)
+
+A run is one headless turn of an agent on this computer, started from the canvas or a phone: continue a session, start one in a folder, or hand a session off (the brief is the prompt). `RunManager` owns them:
+
+- **Starting.** It checks the request, picks the adapter's `headless` driver and one of its two modes, and spawns the tool without a shell, in the session's folder, with the prompt on stdin.
+- **Folder trust.** A run happens only in a folder where that tool already has indexed sessions. A tool whose driver says `checksFolderTrust` (Codex) may also run in any folder you've used another tool in, because it won't load an untrusted folder's settings or hooks itself.
+- **Limits.** One run per session at a time with up to 3 waiting, at most `phone.maxConcurrentRuns` (3) at once, and a time limit (`phone.runTimeoutMinutes`, 30).
+- **Output.** Each stdout line goes through the driver's `parseLine`. Reply text is batched for 100 ms, everything shown or logged is passed through `redact()`, and a line over 1 MB fails the run.
+- **Stopping.** SIGINT so the agent can record the turn, SIGTERM after 5 s, SIGKILL after 10 s (`taskkill /T /F` on Windows).
+- **After a run** the session is re-indexed (`reindexSession()`), so the reader shows the new turn. A new session is found by scanning that tool's folder.
+- **Keeping awake.** While a run is active: `caffeinate -i -w <pid>` on macOS, `systemd-inhibit` on Linux, nothing on Windows.
+- **Logs.** `~/.contextdeck/runs/<id>.jsonl` (0600): the run, its events and how it ended; never the prompt or raw output. The newest 50, at most 7 days old, are kept.
+- **Windows.** A tool installed as a `.cmd` or `.bat` script can only start through cmd.exe, so it's refused rather than passed through a shell.
 
 ### The canvas (`ui/`)
 

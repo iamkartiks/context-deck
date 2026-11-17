@@ -30,6 +30,10 @@ export interface PhoneSettings {
   deviceIdleDays: number;
   /** At most this many paired devices (pending requests count too). */
   maxDevices: number;
+  /** A run started from a phone is stopped after this many minutes. */
+  runTimeoutMinutes: number;
+  /** At most this many runs at once; more wait their turn. */
+  maxConcurrentRuns: number;
 }
 
 export interface Settings {
@@ -48,7 +52,7 @@ export function defaultSettings(): Settings {
   return {
     version: 1,
     semantic: { enabled: false, api: 'ollama', url: DEFAULT_URLS.ollama, model: DEFAULT_MODEL, dims: 512, allowRemote: false, minScore: null },
-    phone: { deviceIdleDays: 30, maxDevices: 10 },
+    phone: { deviceIdleDays: 30, maxDevices: 10, runTimeoutMinutes: 30, maxConcurrentRuns: 3 },
   };
 }
 
@@ -62,6 +66,8 @@ export function sanitizeSettings(input: unknown): Settings {
     const int = (v: unknown, min: number, max: number) => typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
     if (int(p.deviceIdleDays, 1, 365)) out.phone.deviceIdleDays = p.deviceIdleDays as number;
     if (int(p.maxDevices, 1, 50)) out.phone.maxDevices = p.maxDevices as number;
+    if (int(p.runTimeoutMinutes, 1, 240)) out.phone.runTimeoutMinutes = p.runTimeoutMinutes as number;
+    if (int(p.maxConcurrentRuns, 1, 10)) out.phone.maxConcurrentRuns = p.maxConcurrentRuns as number;
   }
   const s = (input as { semantic?: Record<string, unknown> } | null)?.semantic;
   if (!s || typeof s !== 'object') return out;

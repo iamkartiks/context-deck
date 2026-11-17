@@ -21,6 +21,8 @@ export interface AuditEntry {
     | 'pair-claimed'
     | 'device-revoked'
     | 'device-scopes'
+    | 'run-started'
+    | 'run-ended'
     | 'write';
   deviceId?: string;
   pendingId?: string;
@@ -30,6 +32,11 @@ export interface AuditEntry {
   status?: number;
   scopes?: string[];
   reason?: string;
+  runId?: string;
+  kind?: string;
+  provider?: string;
+  mode?: string;
+  state?: string;
 }
 
 export function appendAudit(home: string, entry: AuditEntry, maxBytes = AUDIT_MAX_BYTES): void {

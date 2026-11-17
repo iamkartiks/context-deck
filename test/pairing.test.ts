@@ -68,7 +68,7 @@ function setup(opts: { perMinute?: number; maxDevices?: number } = {}) {
     server: null as unknown as UiServer,
     local: () => ({ 'X-ContextDeck-Token': ctx.server.token, Origin: `http://127.0.0.1:${ctx.server.port}` }),
     async start() {
-      if (opts.maxDevices) saveSettings(s.home, { ...defaultSettings(), phone: { deviceIdleDays: 30, maxDevices: opts.maxDevices } });
+      if (opts.maxDevices) saveSettings(s.home, { ...defaultSettings(), phone: { ...defaultSettings().phone, maxDevices: opts.maxDevices } });
       ctx.store = new Store(cfg.dbPath);
       await indexSources(ctx.store, cfg.sources);
       ctx.server = await startUiServer(ctx.store, cfg, {

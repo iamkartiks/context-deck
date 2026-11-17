@@ -376,6 +376,16 @@ export class Store {
     };
   }
 
+  /** The session files a session was read from. */
+  sessionFiles(sessionId: string): string[] {
+    return (this.db.prepare(`SELECT path FROM files WHERE session_id = ?`).all(sessionId) as Row[]).map((r) => String(r.path));
+  }
+
+  /** Which tools have sessions in exactly this folder. */
+  providersInFolder(cwd: string): string[] {
+    return (this.db.prepare(`SELECT DISTINCT provider FROM sessions WHERE cwd = ?`).all(cwd) as Row[]).map((r) => String(r.provider));
+  }
+
   knownFiles(provider: string): string[] {
     return (this.db.prepare(`SELECT path FROM files WHERE provider = ?`).all(provider) as Row[]).map((r) => String(r.path));
   }

@@ -255,20 +255,35 @@ export interface FakeAgent {
   script: string;
   logPath: string;
   calls: () => { args: string[]; cwd: string; stdin: string }[];
+  /** Signals it received, in order. */
+  signals: () => string[];
 }
 
-export function writeFakeAgent(dir: string, opts: { stream: string; exitCode?: number; name?: string }): FakeAgent {
+export function writeFakeAgent(
+  dir: string,
+  opts: { stream: string; exitCode?: number; name?: string; delayMs?: number; holdMs?: number; ignoreSigint?: boolean },
+): FakeAgent {
   const script = join(dir, `fake-${opts.name ?? 'agent'}.mjs`);
   const logPath = join(dir, `fake-${opts.name ?? 'agent'}.log`);
   writeFileSync(
     script,
     `#!/usr/bin/env node
 import { appendFileSync, readFileSync } from 'node:fs';
+const log = (x) => appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(x) + '\\n');
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => {
+    log({ signal: sig });
+    if (sig === 'SIGTERM' || !${!!opts.ignoreSigint}) process.exit(130);
+  });
+}
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c);
 const stdin = Buffer.concat(chunks).toString('utf8');
-appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), stdin }) + '\\n');
+log({ args: process.argv.slice(2), cwd: process.cwd(), stdin });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+await sleep(${opts.delayMs ?? 0});
 process.stdout.write(readFileSync(${JSON.stringify(opts.stream)}, 'utf8'));
+await sleep(${opts.holdMs ?? 0});
 process.exit(${opts.exitCode ?? 0});
 `,
     { mode: 0o755 },
@@ -281,6 +296,14 @@ process.exit(${opts.exitCode ?? 0});
       readFileSync(logPath, 'utf8')
         .split('\n')
         .filter(Boolean)
-        .map((l) => JSON.parse(l)),
+        .map((l) => JSON.parse(l))
+        .filter((x) => x.args),
+    signals: () =>
+      readFileSync(logPath, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map((l) => JSON.parse(l))
+        .filter((x) => x.signal)
+        .map((x) => x.signal),
   };
 }
