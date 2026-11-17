@@ -3,9 +3,13 @@ import { DatabaseSync } from 'node:sqlite';
 import { parseArgs } from 'node:util';
 import { getAdapter } from './adapters/index.js';
 import { loadConfig, type Config } from './config.js';
-import { ago, bytes, c, contextUsage, indent, providerLabel, table, tokens } from './format.js';
+import { ago, bytes, c, contextUsage, indent, providerLabel, table, tokens, useColor } from './format.js';
 import { indexSources, watchSources, type IndexSummary } from './indexer.js';
-import { openBrowser, startUiServer } from './server.js';
+import { openBrowser, startUiServer, type UiServer } from './server.js';
+import { loadDevices, pruneDevices, publicDevice, revokeDevices, saveDevices } from './devices.js';
+import { appendAudit } from './audit.js';
+import { qrTerminal } from './qr.js';
+import { checkServe, requireReady, serve, unserve, unserveCommandText } from './tailscale.js';
 import { adapterByPrefix } from './adapters/index.js';
 import { decisionMatches, loadDecisions, resolveDecisions, type ResolvedDecision } from './decisions.js';
 import { buildBrief, saveBrief, startLaunch } from './handoff.js';
@@ -44,6 +48,8 @@ ${c.bold('Commands')}
   related <id>        Sessions in any tool that touched the same files
   projects            Sessions grouped by working directory, across tools
   ui                  Open the visual canvas in your browser (local only)
+  phone [devices|revoke <id|all>]
+                      Phones paired with \`ui --phone\`: list them, or remove them
   watch               Keep the index up to date as you work
   stats               What's in the index
   doctor              Check paths, Node features and parse errors
@@ -86,9 +92,13 @@ ${c.bold('Handoff options')}
 ${c.bold('UI options')}
       --port <n>        Port for \`ui\` (default 4977; the next free one is used if taken)
       --no-open         Don't open the browser automatically
+      --phone           Also let phones you approve open it, over your Tailscale network
+                        (never the public internet). Needs Tailscale with HTTPS turned on
+      --no-serve        With --phone: you set up Tailscale Serve yourself; don't touch it
 
 ${c.bold('Examples')}
   contextdeck ui
+  contextdeck ui --phone
   contextdeck index
   contextdeck search "rate limit" --provider codex
   contextdeck show cc:1a2b3c4d
@@ -113,6 +123,8 @@ const OPTIONS = {
   messages: { type: 'string', short: 'm' },
   port: { type: 'string' },
   'no-open': { type: 'boolean' },
+  phone: { type: 'boolean' },
+  'no-serve': { type: 'boolean' },
   to: { type: 'string', short: 't' },
   print: { type: 'boolean' },
   'no-check-in': { type: 'boolean' },
@@ -619,26 +631,126 @@ async function cmdUi(cfg: Config, store: Store, v: Values): Promise<void> {
     port = Number(v.port);
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw new UsageError('--port must be a number from 0 to 65535');
   }
+  if (v['no-serve'] && !v.phone) throw new UsageError('--no-serve only works with --phone');
+  // Check Tailscale before doing any work, so a problem shows up straight away
+  const tailnet = v.phone ? (await requireReady()).dnsName : null;
+
   const tty = process.stdout.isTTY;
   if (tty) process.stdout.write(c.dim('Indexing…\r'));
   const first = await indexSources(store, cfg.sources);
   process.stdout.write((tty ? '\x1b[K' : '') + summaryLine(first) + '\n');
 
-  const server = await startUiServer(store, cfg, { port, initialIndex: first });
-  process.stdout.write(
-    `\n${c.bold('ContextDeck is open at')} ${c.cyan(server.url)}\n` +
-      c.dim('Only this computer can reach it. Keeps updating as your agents work. Ctrl+C to stop.\n'),
-  );
+  const server = await startUiServer(store, cfg, {
+    port,
+    initialIndex: first,
+    ...(tailnet
+      ? {
+          phone: { tailnetHost: tailnet },
+          onPairRequest: (p: { name: string; tailscaleLogin: string }) =>
+            process.stdout.write(`\n${c.bold(`${p.name} (${p.tailscaleLogin}) wants to pair.`)} Allow or deny it in ContextDeck in your browser on this computer.\n`),
+        }
+      : {}),
+  });
+
+  let served = false;
+  if (tailnet) {
+    try {
+      if (v['no-serve']) {
+        const { warning } = await checkServe(server.port, tailnet);
+        if (warning) process.stdout.write(c.yellow(warning) + '\n');
+      } else {
+        served = (await serve(server.port, tailnet)).added;
+      }
+    } catch (err) {
+      await server.close();
+      throw err;
+    }
+  }
+
+  if (!tailnet) {
+    process.stdout.write(
+      `\n${c.bold('ContextDeck is open at')} ${c.cyan(server.url)}\n` +
+        c.dim('Only this computer can reach it. Keeps updating as your agents work. Ctrl+C to stop.\n'),
+    );
+  } else {
+    process.stdout.write(
+      `\n${c.bold('ContextDeck is open at')} ${c.cyan(server.url)}\n` +
+        `${c.bold('On your phone:')} ${c.cyan(`https://${tailnet}/`)}\n` +
+        c.dim('Who can reach it: devices on your Tailscale network that you approve. Nothing is on the public internet.\n'),
+    );
+    printPairingCode(server);
+    process.stdout.write(c.dim(`${tty && process.stdin.isTTY ? 'Press Enter for a new code. ' : ''}Ctrl+C to stop.\n`));
+  }
   if (!v['no-open']) openBrowser(server.url);
 
+  // Enter prints a fresh pairing code (codes work once, for 5 minutes)
+  const onKey = () => printPairingCode(server);
+  if (tailnet && process.stdin.isTTY) process.stdin.on('data', onKey);
+
   await new Promise<void>((done) => {
-    const stop = () => {
+    let stopping = false;
+    const stop = async () => {
+      if (stopping) return;
+      stopping = true;
       process.stdout.write(c.dim('\nStopping…\n'));
-      server.close().then(done, done);
+      if (tailnet && process.stdin.isTTY) {
+        process.stdin.off('data', onKey);
+        process.stdin.pause();
+      }
+      if (served) {
+        try {
+          await unserve();
+          process.stdout.write(c.dim('Removed the Tailscale Serve entry for ContextDeck.\n'));
+        } catch (err) {
+          process.stdout.write(
+            c.yellow(`Couldn’t remove the Tailscale Serve entry (${(err as Error).message}). Remove it with:\n  ${unserveCommandText()}\n`),
+          );
+        }
+      }
+      await server.close().catch(() => {});
+      done();
     };
     process.once('SIGINT', stop);
     process.once('SIGTERM', stop);
   });
+}
+
+function printPairingCode(server: UiServer): void {
+  const made = server.pairingCode();
+  if (!made) return;
+  process.stdout.write(
+    `\n${c.bold('To pair a phone, scan this')} ${c.dim('(works once, for 5 minutes):')}\n` +
+      qrTerminal(made.url, { color: useColor }) +
+      `\n${c.dim(`Or open ${made.url} on the phone.`)}\n`,
+  );
+}
+
+function cmdPhone(cfg: Config, v: Values, args: string[]): void {
+  const [sub = 'devices', target] = args;
+  if (sub === 'devices' || sub === 'list') {
+    const file = loadDevices(cfg.home);
+    if (pruneDevices(file)) saveDevices(cfg.home, file);
+    const devices = file.devices.map(publicDevice);
+    print(!!v.json, devices, () => {
+      if (!devices.length) return c.dim('No phones are paired. Start `contextdeck ui --phone` and scan the code to pair one.');
+      return table(
+        [{ header: 'ID' }, { header: 'NAME' }, { header: 'TAILSCALE LOGIN' }, { header: 'CAN' }, { header: 'LAST SEEN' }],
+        devices.map((d) => [c.bold(d.id), d.name, d.tailscaleLogin, d.scopes.join(', '), ago(d.lastSeenAt)]),
+      );
+    });
+    return;
+  }
+  if (sub === 'revoke' || sub === 'remove') {
+    if (!target) throw new UsageError('Which device? Give its id from `contextdeck phone devices`, or "all".');
+    const gone = revokeDevices(cfg.home, target);
+    for (const id of gone) appendAudit(cfg.home, { action: 'device-revoked', deviceId: id });
+    if (!gone.length && target !== 'all') throw new Error(`No paired device has the id "${target}". See \`contextdeck phone devices\`.`);
+    print(!!v.json, { revoked: gone }, () =>
+      gone.length ? `Removed ${plural(gone.length, 'device')}: ${gone.join(', ')}. ${c.dim('They lose access on their next request.')}` : c.dim('No phones were paired.'),
+    );
+    return;
+  }
+  throw new UsageError(`Unknown phone command "${sub}". Use \`contextdeck phone devices\` or \`contextdeck phone revoke <id|all>\`.`);
 }
 
 function cmdStats(cfg: Config, store: Store, v: Values): void {
@@ -797,6 +909,9 @@ export async function main(argv: string[]): Promise<number> {
       case 'ui':
       case 'open':
         await cmdUi(cfg, store, v);
+        break;
+      case 'phone':
+        cmdPhone(cfg, v, args);
         break;
       case 'stats':
         cmdStats(cfg, store, v);

@@ -1,7 +1,7 @@
 import { getAdapter } from './adapters/index.js';
 import type { SessionRow } from './schema.js';
 
-const useColor = process.stdout.isTTY && !process.env.NO_COLOR && process.env.TERM !== 'dumb';
+export const useColor = process.stdout.isTTY && !process.env.NO_COLOR && process.env.TERM !== 'dumb';
 
 const wrap = (open: number, close: number) => (s: string) => (useColor ? `\x1b[${open}m${s}\x1b[${close}m` : s);
 export const c = {
