@@ -721,7 +721,8 @@ function printPairingCode(server: UiServer): void {
   process.stdout.write(
     `\n${c.bold('To pair a phone, scan this')} ${c.dim('(works once, for 5 minutes):')}\n` +
       qrTerminal(made.url, { color: useColor }) +
-      `\n${c.dim(`Or open ${made.url} on the phone.`)}\n`,
+      `\n${c.dim(`Or open ${made.url} on the phone.`)}\n` +
+      c.dim('Phone won’t read it? Choose Phones in ContextDeck in your browser for a bigger code.\n'),
   );
 }
 
