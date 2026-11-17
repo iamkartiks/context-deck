@@ -1,0 +1,11 @@
+{"type":"thread.started","thread_id":"019a2f3c-5d6e-7f80-91a2-b3c4d5e6f701"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"**Finding the limiter**"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"bash -lc 'rg -n WINDOW_MS src'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"bash -lc 'rg -n WINDOW_MS src'","aggregated_output":"src/limit.ts:1:export const WINDOW_MS = 60_000;\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"bash -lc 'touch src/new.ts'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"bash -lc 'touch src/new.ts'","aggregated_output":"","exit_code":null,"status":"declined"}}
+{"type":"item.completed","item":{"id":"item_3","type":"file_change","changes":[{"path":"/Users/alice/code/acme-shop/src/limit.ts","kind":"update"}],"status":"completed"}}
+{"broken json
+{"type":"item.completed","item":{"id":"item_4","type":"agent_message","text":"The limiter resets every minute."}}
+{"type":"turn.completed","usage":{"input_tokens":1200,"cached_input_tokens":0,"output_tokens":80}}

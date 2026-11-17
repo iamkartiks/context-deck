@@ -13,6 +13,7 @@ import {
   truncate,
 } from '../util/text.js';
 import type { Adapter, ResumeCommand } from './types.js';
+import { claudeCodeHeadless } from './headless.js';
 
 /**
  * Claude Code
@@ -269,6 +270,7 @@ export const claudeCodeAdapter: Adapter = {
 
   // `claude "prompt"` starts an interactive session with an initial prompt.
   startCommand: () => ({ command: 'claude', args: [] }),
+  headless: claudeCodeHeadless,
   defaultContextWindow: 200_000,
 
   resumeCommand(session: SessionRow): ResumeCommand {

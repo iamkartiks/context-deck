@@ -3,6 +3,7 @@ import { emptySession, type NormalizedSession, type ParseResult, type SessionRow
 import { listFiles, readJsonl } from '../util/jsonl.js';
 import { asNumber, asString, clean, MAX_TOOL_CHARS, noteEdit, titleFrom, trackTime, truncate } from '../util/text.js';
 import type { Adapter, ResumeCommand } from './types.js';
+import { qwenCodeHeadless } from './headless.js';
 
 /**
  * Qwen Code (github.com/QwenLM/qwen-code)
@@ -243,6 +244,7 @@ export const qwenCodeAdapter: Adapter = {
 
   // `qwen "prompt"` runs once and exits; `-i` runs the prompt and stays interactive.
   startCommand: () => ({ command: 'qwen', args: ['-i'] }),
+  headless: qwenCodeHeadless,
 
   resumeCommand(session: SessionRow): ResumeCommand {
     // Subagents can't be resumed on their own; resume the parent conversation.

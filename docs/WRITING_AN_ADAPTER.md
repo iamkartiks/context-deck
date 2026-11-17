@@ -109,7 +109,29 @@ npm test
 node bin/contextdeck.js --home .demo index && node bin/contextdeck.js --home .demo list
 ```
 
-## 6. Checklist for the PR
+## 6. Optional: running it headless
+
+To let ContextDeck run one turn of your tool without a terminal (for runs started from a phone), add a `headless` driver. See `src/adapters/headless.ts` for the three built-in ones.
+
+```ts
+headless: {
+  testedWith: 'Acme 1.4.0',
+  continueArgs(session, mode) { /* one turn in an existing session, in session.cwd */ },
+  startArgs(cwd, mode) { /* one turn in a new session in cwd */ },
+  parseLine(line) { /* one line of streamed output → RunEvent[]; never throws */ },
+}
+```
+
+Rules:
+
+- **Only two modes.** `plan` changes nothing. `edit` may change files in the session's folder and nothing else, and anything that would need approval is refused rather than waiting. Map them to your tool's flags in a fixed table.
+- **Never a mode that skips permissions.** No "yolo", "bypass", "danger-full-access", "dangerously" or automatic-approval flags, whatever the request. `test/headless.test.ts` checks every driver, mode and kind of run for these. Add your driver to its list.
+- **The prompt goes on stdin**, never in the arguments: arguments are visible to other programs.
+- **Refuse unsafe session ids.** Use the same check as the built-in drivers, so an id that starts with `-` can't become a flag.
+- **Check every flag against `--help`** on the version you test with, and put that version in `testedWith`.
+- **Stream fixtures are synthetic,** in `fixtures/streams/`. Include a refused action, and a line that isn't JSON.
+
+## 7. Checklist for the PR
 
 - [ ] Header comment documents the layout and line types
 - [ ] Every stored string goes through `clean()`
@@ -118,3 +140,4 @@ node bin/contextdeck.js --home .demo index && node bin/contextdeck.js --home .de
 - [ ] Never writes to the tool's folders, never uses the network
 - [ ] Synthetic fixtures only
 - [ ] README "Where it looks" table updated
+- [ ] If it has a `headless` driver: in the forbidden-flags test, with `testedWith` and synthetic stream fixtures

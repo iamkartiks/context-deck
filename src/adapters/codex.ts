@@ -14,6 +14,7 @@ import {
   truncate,
 } from '../util/text.js';
 import type { Adapter, ResumeCommand } from './types.js';
+import { codexHeadless } from './headless.js';
 
 /**
  * OpenAI Codex CLI
@@ -298,6 +299,7 @@ export const codexAdapter: Adapter = {
 
   // `codex "prompt"` starts the interactive TUI with an initial prompt.
   startCommand: () => ({ command: 'codex', args: [] }),
+  headless: codexHeadless,
   defaultContextWindow: 272_000,
 
   resumeCommand(session: SessionRow): ResumeCommand {
