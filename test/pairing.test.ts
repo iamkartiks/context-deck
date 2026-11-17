@@ -294,7 +294,10 @@ describe('phone scopes', () => {
   it('refuses computer-only routes even to a phone holding every scope', async () => {
     const all = ['view', 'decide', 'handoff', 'run', 'edit', 'approve'];
     assert.equal((await call(t.server.port, `/api/devices/${deviceId}`, { method: 'PUT', headers: t.local(), body: { scopes: all } })).status, 200);
-    assert.equal((await call(t.server.port, `/api/handoff/preview?id=${encodeURIComponent(sessionId)}&to=codex`, { headers: t.as(secret) })).status, 200);
+    const preview = await call(t.server.port, `/api/handoff/preview?id=${encodeURIComponent(sessionId)}&to=codex`, { headers: t.as(secret) });
+    assert.equal(preview.status, 200);
+    assert.equal(preview.json().canOpenTerminal, false, 'a phone is never offered a terminal on the computer');
+    assert.equal((await call(t.server.port, `/api/handoff/preview?id=${encodeURIComponent(sessionId)}&to=codex`)).json().canOpenTerminal, true);
     for (const [method, path, body] of [
       ['POST', '/api/open-terminal', { id: sessionId }],
       ['PUT', '/api/layout', { positions: {} }],

@@ -449,6 +449,19 @@ describe('runs over HTTP, with phone scopes', () => {
     assert.equal((await start(all, resume('edit'))).status, 202);
   });
 
+  it('starts nothing in plain `contextdeck ui` (phone mode off)', async () => {
+    const plain = await startUiServer(store, env.cfg, { port: 0, watch: false, terminal: null, runs: { keepAwake: false, wrapCommand: viaNode(fake) } });
+    try {
+      const r = await call(plain.port, '/api/runs', { method: 'POST', headers: { 'X-ContextDeck-Token': plain.token }, body: resume('plan') });
+      assert.equal(r.status, 409);
+      assert.match(r.json().error, /phone mode/);
+      const caps = (await call(plain.port, '/api/board')).json().capabilities.runs;
+      assert.deepEqual(caps, { handoff: false, run: false, edit: false, tools: [] });
+    } finally {
+      await plain.close();
+    }
+  });
+
   it('tells the page what it may start', async () => {
     const caps = (await call(server.port, '/api/board')).json().capabilities.runs;
     assert.deepEqual([caps.handoff, caps.run, caps.edit], [true, true, true]);

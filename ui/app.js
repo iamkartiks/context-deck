@@ -246,6 +246,9 @@ const state = {
   connected: true,
   devices: null, // phone mode, on this computer: { phone, devices, pending }
   phonesOpen: false,
+  runs: new Map(), // run id → run (agents started from here or a phone)
+  runEvents: new Map(), // run id → its events, for runs being shown
+  openRun: null, // the run expanded in the reader
 };
 
 /** What this page may do (a phone sees only what its scopes allow). */
@@ -507,6 +510,7 @@ function cardChildren(item) {
             ? h('span', { class: 'helpers' }, `+${plural(helpers, 'subagent')}`)
             : null,
         decided ? h('span', { class: 'decided-count', title: plural(decided, 'decision') }, flag(), String(decided)) : null,
+        runChipFor(item.id),
         ctx ? h('span', { class: 'pct' }, ctx.pct != null ? `${pctOf(ctx)}%` : tokens(ctx.tokens)) : null,
       ),
     ),
@@ -889,6 +893,7 @@ function renderList() {
             'span',
             { class: 'r-title', title: item.title },
             decided ? h('span', { class: 'decided-count', title: plural(decided, 'decision') }, flag(), String(decided)) : null,
+            runChipFor(item.id),
             item.title,
           ),
           decision
@@ -1762,6 +1767,7 @@ function renderReader({ keepScroll = null } = {}) {
   const d = state.detail;
   // Typing in the find box shouldn't lose focus when a jump reloads the panel
   const findFocus = document.activeElement?.classList?.contains('find-input') ? document.activeElement.selectionStart : null;
+  const runFocus = document.activeElement?.classList?.contains('run-input') ? document.activeElement.selectionStart : null;
   if (!d) {
     els.reader.hidden = true;
     return;
@@ -1809,7 +1815,8 @@ function renderReader({ keepScroll = null } = {}) {
       )
     : null;
 
-  const targets = sess.isSubagent ? [] : (caps.handoffTargets ?? []);
+  // On this computer: the tools a handoff can open a terminal for. On a phone: the tools that can run here, if it may hand off.
+  const targets = sess.isSubagent ? [] : caps.handoffTargets?.length ? caps.handoffTargets : runCaps().handoff ? runCaps().tools : [];
   const others = targets.filter((t) => t.id !== sess.provider);
   const same = targets.find((t) => t.id === sess.provider);
   const nearlyFull = (ctx?.pct ?? 0) >= 0.8;
@@ -1838,7 +1845,9 @@ function renderReader({ keepScroll = null } = {}) {
           { class: 'note' },
           nearlyFull
             ? 'This window is nearly full. A fresh session with a brief from this one gives the next step room to think.'
-            : 'Writes a brief from this session so a new agent can pick up where it left off. You read and edit it before anything starts.',
+            : isPhone()
+              ? 'Writes a brief from this session so a new agent can pick up where it left off. You read and edit it, then it starts on your computer.'
+              : 'Writes a brief from this session so a new agent can pick up where it left off. You read and edit it before anything starts.',
         ),
       )
     : null;
@@ -1990,6 +1999,7 @@ function renderReader({ keepScroll = null } = {}) {
       ),
       h('h2', { id: 'reader-title' }, sess.title),
       resume,
+      workSection(sess),
       decisions,
       handoff,
       context,
@@ -2042,7 +2052,270 @@ function renderReader({ keepScroll = null } = {}) {
     input?.focus({ preventScroll: true });
     input?.setSelectionRange(findFocus, findFocus);
   }
+  if (runFocus != null) {
+    const input = $('.run-input', els.reader);
+    input?.focus({ preventScroll: true });
+    input?.setSelectionRange(runFocus, runFocus);
+  }
 }
+
+// ── Runs ──────────────────────────────────────────────────────────────────
+// Agents started on your computer, from here or a phone: send a message to a
+// session, or hand it off, and watch the agent work.
+
+const RUN_STATE = { queued: 'Waiting', running: 'Running', done: 'Done', failed: 'Failed', stopped: 'Stopped' };
+const RECENT_RUN_MS = 10 * 60_000;
+const runCaps = () => caps().runs ?? { handoff: false, run: false, edit: false, tools: [] };
+const canRunTool = (provider) => runCaps().tools.some((t) => t.id === provider);
+const canStopRuns = () => !isPhone() || runCaps().run;
+const isLive = (run) => run.state === 'running' || run.state === 'queued';
+const folderName = (cwd) => (cwd ?? '').split(/[\\/]/).filter(Boolean).pop() ?? cwd;
+/** Typed messages survive the reader being redrawn, per session. */
+const messageDrafts = new Map();
+let runPickers = 0;
+
+function runsFor(sessionId) {
+  return [...state.runs.values()].filter((r) => r.sessionId === sessionId || r.fromSessionId === sessionId).sort((a, b) => b.queuedAt.localeCompare(a.queuedAt));
+}
+
+/** A card's run status: an active run, or one that ended in the last 10 minutes. */
+function runChipFor(sessionId) {
+  if (!state.runs.size) return null;
+  const mine = [...state.runs.values()].filter((r) => r.sessionId === sessionId);
+  const run =
+    mine.find((r) => r.state === 'running') ??
+    mine.find((r) => r.state === 'queued') ??
+    mine.filter((r) => r.endedAt && Date.now() - Date.parse(r.endedAt) < RECENT_RUN_MS).sort((a, b) => b.endedAt.localeCompare(a.endedAt))[0];
+  if (!run) return null;
+  return h('span', { class: `run-chip ${run.state}`, title: `${RUN_STATE[run.state]}: ${run.providerLabel}, started by ${run.startedBy.name}` }, RUN_STATE[run.state]);
+}
+
+function elapsed(run) {
+  if (!run.startedAt) return '';
+  const ms = (run.endedAt ? Date.parse(run.endedAt) : Date.now()) - Date.parse(run.startedAt);
+  const sec = Math.max(0, Math.round(ms / 1000));
+  return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+}
+
+/** Plan only, or (if this page may) edit files in the folder, named in full. */
+function modePicker(cwd) {
+  const name = `run-mode-${++runPickers}`;
+  const plan = h('input', { type: 'radio', name, value: 'plan', checked: true });
+  const edit = runCaps().edit ? h('input', { type: 'radio', name, value: 'edit' }) : null;
+  const el = h(
+    'fieldset',
+    { class: 'mode-picker' },
+    h('legend', { class: 'visually-hidden' }, 'What the agent may do'),
+    h('label', {}, plan, h('span', {}, h('strong', {}, 'Plan only'), ' (no changes)')),
+    edit ? h('label', {}, edit, h('span', {}, h('strong', {}, 'Edit files in '), h('code', {}, cwd))) : null,
+    !edit && isPhone() ? h('p', { class: 'note' }, 'This phone can start Plan only runs. Editing files can be allowed on your computer, under Phones.') : null,
+  );
+  return { el, value: () => (edit?.checked ? 'edit' : 'plan') };
+}
+
+function mergeRunEvents(list, events) {
+  for (const e of events) {
+    const last = list.at(-1);
+    if (e.type === 'text' && !e.start && last?.type === 'text') last.delta += e.delta;
+    else list.push({ ...e });
+  }
+}
+
+const loadingRuns = new Set();
+async function loadRunEvents(id) {
+  if (loadingRuns.has(id)) return;
+  loadingRuns.add(id);
+  try {
+    const { run, events } = await api(`/api/runs/${encodeURIComponent(id)}`);
+    state.runs.set(run.id, run);
+    state.runEvents.set(run.id, events);
+    refreshRuns();
+  } catch {
+    // It may have been dropped from the server's recent list: don't keep asking
+    if (!state.runEvents.has(id)) state.runEvents.set(id, []);
+  } finally {
+    loadingRuns.delete(id);
+  }
+}
+
+function setRuns(list) {
+  state.runs = new Map(list.map((r) => [r.id, r]));
+  for (const r of list) if (isLive(r)) loadRunEvents(r.id);
+}
+
+function upsertRun(run) {
+  const before = state.runs.get(run.id);
+  state.runs.set(run.id, run);
+  if (!before) {
+    state.runEvents.set(run.id, state.runEvents.get(run.id) ?? []);
+    // On this computer, say when a phone starts something
+    if (run.startedBy.deviceId && !isPhone()) toast(`${run.startedBy.name} started ${run.providerLabel} in ${folderName(run.cwd)}.`);
+  }
+  // When it ends, take the server's copy of its events, in case any were missed
+  if (before && isLive(before) && !isLive(run)) loadRunEvents(run.id);
+  if (!before || before.state !== run.state || before.sessionId !== run.sessionId) render();
+  refreshRuns();
+}
+
+function addRunEvents(runId, events) {
+  const list = state.runEvents.get(runId);
+  if (!list) return; // not being followed; it's fetched when shown
+  mergeRunEvents(list, events);
+  refreshRuns();
+}
+
+async function stopRun(run) {
+  try {
+    await api(`/api/runs/${encodeURIComponent(run.id)}`, { method: 'DELETE' });
+    toast(run.state === 'queued' ? 'Cancelled.' : 'Stopping…');
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+/** The reader's "Work on it" section: send a message, and the runs for this session. */
+function workSection(sess) {
+  const canSend = runCaps().run && canRunTool(sess.provider) && !sess.isSubagent && !!sess.cwd;
+  const list = h('div', { class: 'run-list' });
+  const el = h('section', { class: 'section work', dataset: { session: sess.id } }, h('div', { class: 'label' }, 'Work on it'), canSend ? messageForm(sess) : null, list);
+  fillRunList(list, sess.id);
+  el.hidden = !canSend && !list.childElementCount;
+  return el;
+}
+
+function messageForm(sess) {
+  const ta = h('textarea', {
+    class: 'run-input',
+    id: 'run-input',
+    rows: 3,
+    maxlength: 200000,
+    placeholder: `Tell ${toolLabel(sess.provider)} what to do next`,
+    oninput: () => messageDrafts.set(sess.id, ta.value),
+    onkeydown: (e) => {
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        form.requestSubmit();
+      }
+    },
+  });
+  ta.value = messageDrafts.get(sess.id) ?? '';
+  const mode = modePicker(sess.cwd);
+  const form = h(
+    'form',
+    {
+      class: 'run-form',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        if (!ta.value.trim()) return toast('Write a message first.');
+        const btn = $('button[type=submit]', form);
+        btn.disabled = true;
+        try {
+          const run = await api('/api/runs', { method: 'POST', body: { kind: 'resume', sessionId: sess.id, mode: mode.value(), prompt: ta.value } });
+          messageDrafts.delete(sess.id);
+          ta.value = '';
+          state.openRun = run.id;
+          upsertRun(run);
+          toast(run.state === 'queued' ? 'Waiting for the run before it to finish.' : `Sent. ${toolLabel(sess.provider)} is working on your computer.`);
+        } catch (err) {
+          toast(err.message);
+        } finally {
+          btn.disabled = false;
+        }
+      },
+    },
+    h('label', { class: 'visually-hidden', for: 'run-input' }, `Message for ${toolLabel(sess.provider)}`),
+    ta,
+    mode.el,
+    h(
+      'div',
+      { class: 'actions' },
+      h('button', { type: 'submit', class: 'pill solid' }, 'Send'),
+      h('span', { class: 'note' }, isPhone() ? 'Runs on your computer.' : 'Runs here, in the background.'),
+    ),
+  );
+  return form;
+}
+
+function fillRunList(list, sessionId) {
+  const runs = runsFor(sessionId).slice(0, 5);
+  const open = runs.find((r) => r.id === state.openRun) ?? runs.find(isLive) ?? runs[0];
+  const log = $('.run-log', list);
+  const atBottom = !log || log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  list.replaceChildren(...runs.map((r) => runEl(r, r === open, sessionId)));
+  const fresh = $('.run-log', list);
+  if (fresh && atBottom) fresh.scrollTop = fresh.scrollHeight;
+}
+
+let runsFrame = 0;
+/** Redraw the reader's runs (batched to one per frame). */
+function refreshRuns() {
+  if (runsFrame) return;
+  runsFrame = requestAnimationFrame(() => {
+    runsFrame = 0;
+    const work = $('.work', els.reader);
+    if (!work) return;
+    const list = $('.run-list', work);
+    fillRunList(list, work.dataset.session);
+    work.hidden = !$('.run-form', work) && !list.childElementCount;
+  });
+}
+
+function runEl(run, expanded, sessionId) {
+  const live = isLive(run);
+  const what =
+    run.kind === 'handoff'
+      ? `${run.fromSessionId === sessionId ? 'Handed off to' : 'Started from a handoff,'} ${run.providerLabel}`
+      : run.kind === 'new'
+        ? `New ${run.providerLabel} session`
+        : `Message to ${run.providerLabel}`;
+  const head = h(
+    'div',
+    { class: 'run-head' },
+    h('span', { class: `run-chip ${run.state}` }, RUN_STATE[run.state]),
+    h('span', { class: 'run-what' }, what),
+    h('span', { class: 'run-time', dataset: { runTime: run.id } }, elapsed(run)),
+    live && canStopRuns() ? h('button', { type: 'button', class: 'pill outline small', onclick: () => stopRun(run) }, run.state === 'queued' ? 'Cancel' : 'Stop') : null,
+  );
+  const meta = h('p', { class: 'note run-meta' }, `${run.mode === 'edit' ? `Edit files in ${run.cwd}` : 'Plan only'} · started by ${run.startedBy.name} ${agoLong(run.queuedAt)}`);
+  if (!expanded) {
+    return h('div', { class: `run ${run.state}` }, head, h('button', { type: 'button', class: 'text-button', onclick: () => ((state.openRun = run.id), refreshRuns()) }, 'Show what it did'));
+  }
+  const events = state.runEvents.get(run.id);
+  if (!events) loadRunEvents(run.id);
+  const log = h('div', { class: 'run-log', tabindex: '0', 'aria-label': 'What the agent did' });
+  let para = null;
+  for (const e of (events ?? []).slice(-400)) {
+    if (e.type === 'text') {
+      if (e.start || !para) log.append((para = h('p', { class: 'run-text' })));
+      para.append(e.delta);
+      continue;
+    }
+    para = null;
+    if (e.type === 'tool') log.append(h('p', { class: 'run-tool' }, h('span', { class: 'run-tool-name' }, e.name), e.summary ? ` ${e.summary}` : ''));
+    else if (e.type === 'denied') log.append(h('p', { class: 'run-denied' }, `${e.tool}: ${e.reason}`));
+    else if (e.type === 'error') log.append(h('p', { class: 'run-error' }, e.message));
+  }
+  if (!log.childElementCount) log.append(h('p', { class: 'note' }, events ? (run.state === 'queued' ? 'Waiting for the run before it to finish.' : live ? 'Starting…' : 'Nothing was recorded.') : 'Loading…'));
+  const other = run.kind !== 'resume' && run.sessionId && run.sessionId !== sessionId && state.byId.has(run.sessionId);
+  return h(
+    'div',
+    { class: `run ${run.state} open` },
+    head,
+    meta,
+    log,
+    run.reason && run.state !== 'done' ? h('p', { class: run.state === 'failed' ? 'warn' : 'note' }, run.reason) : null,
+    other ? h('button', { type: 'button', class: 'pill outline small', onclick: () => select(run.sessionId) }, `Open the new ${run.providerLabel} session`) : null,
+    run.state === 'done' && run.kind !== 'resume' && !other ? h('p', { class: 'note' }, 'The new session shows up here once it’s been read.') : null,
+  );
+}
+
+// Keep the run timers ticking
+setInterval(() => {
+  for (const el of document.querySelectorAll('[data-run-time]')) {
+    const run = state.runs.get(el.dataset.runTime);
+    if (run?.state === 'running') el.textContent = elapsed(run);
+  }
+}, 1000);
 
 // ── Handoff composer ─────────────────────────────────────────────────────
 
@@ -2159,6 +2432,25 @@ function renderComposer(text) {
   };
   const cmd = h('code', { class: 'composer-cmd', hidden: true });
 
+  // Run it here in the background (or, from a phone, on the computer) and watch it
+  const canRun = runCaps().handoff && canRunTool(c.to) && !!p.cwd && p.cwdExists !== false;
+  const mode = canRun ? modePicker(p.cwd) : null;
+  const runInBackground = async () => {
+    busy(true);
+    try {
+      const run = await api('/api/runs', { method: 'POST', body: { kind: 'handoff', sessionId: c.sessionId, to: c.to, handoffId: p.handoffId, brief: ta.value, mode: mode.value() } });
+      drafts.delete(c.key);
+      state.openRun = run.id;
+      upsertRun(run);
+      closeComposer();
+      toast(`Started ${p.toLabel} on your computer. Follow it under “Work on it”.`);
+      if (state.selected !== c.sessionId) select(c.sessionId);
+    } catch (err) {
+      toast(err.message);
+      busy(false);
+    }
+  };
+
   const notes = [
     p.crossProvider && MODEL_DEPENDENT.has(p.to)
       ? h('p', { class: 'note' }, `Starting it sends this brief to the model ${p.toLabel} is set up to use. With a local model it stays on this computer; otherwise it goes to that model’s provider. Secrets were removed when the session was indexed, but read it through first.`)
@@ -2205,11 +2497,15 @@ function renderComposer(text) {
     ta,
     h('div', { class: 'composer-meta' }, meta, h('label', { class: 'toggle' }, checkIn, 'Check in before changing files')),
     cmd,
+    canRun ? h('div', { class: 'composer-run' }, h('p', { class: 'note' }, isPhone() ? 'It runs on your computer, and you can follow it from here.' : 'Or run it here in the background, and follow it from any device:'), mode.el) : null,
+    isPhone() && !canRun ? h('p', { class: 'warn' }, 'This phone can’t start it: the session’s folder isn’t on your computer.') : null,
     h(
       'div',
       { class: 'composer-actions' },
+      canRun && isPhone() ? h('button', { type: 'button', class: 'pill solid', onclick: runInBackground }, 'Start on your computer') : null,
       p.canOpenTerminal ? h('button', { type: 'button', class: 'pill solid', onclick: () => launch(true) }, 'Open in Terminal') : null,
-      h('button', { type: 'button', class: `pill ${p.canOpenTerminal ? 'outline' : 'solid'}`, onclick: () => launch(false) }, 'Copy command'),
+      isPhone() ? null : h('button', { type: 'button', class: `pill ${p.canOpenTerminal ? 'outline' : 'solid'}`, onclick: () => launch(false) }, 'Copy command'),
+      canRun && !isPhone() ? h('button', { type: 'button', class: 'pill outline', onclick: runInBackground }, 'Run in background') : null,
       h(
         'button',
         {
@@ -2425,6 +2721,35 @@ function disconnectButton(label, confirmLabel, run) {
   return btn;
 }
 
+const SCOPE_LABELS = [
+  ['decide', 'Mark decisions'],
+  ['handoff', 'Hand off sessions to an agent'],
+  ['run', 'Send messages to sessions, and stop runs'],
+  ['edit', 'Let agents edit files (otherwise Plan only)'],
+];
+
+/** What a phone may do, one checkbox per scope. "Edit files" only counts with handoff or run. */
+function scopeToggles(d) {
+  const starts = d.scopes.includes('handoff') || d.scopes.includes('run');
+  return h(
+    'div',
+    { class: 'scope-toggles', role: 'group', 'aria-label': `What ${d.name} may do` },
+    SCOPE_LABELS.map(([scope, label]) =>
+      h(
+        'label',
+        { class: 'toggle' },
+        h('input', {
+          type: 'checkbox',
+          checked: d.scopes.includes(scope),
+          disabled: scope === 'edit' && !starts && !d.scopes.includes('edit'),
+          onchange: (e) => setPhoneScopes(d, e.target.checked ? uniq([...d.scopes, scope]) : d.scopes.filter((x) => x !== scope && !(x === 'edit' && scope !== 'decide' && !d.scopes.some((y) => y !== scope && (y === 'handoff' || y === 'run'))))),
+        }),
+        label,
+      ),
+    ),
+  );
+}
+
 function renderPhones() {
   const view = state.devices ?? { devices: [], pending: [] };
   const code = state.phonesOpen?.code;
@@ -2497,16 +2822,7 @@ function renderPhones() {
                 { class: 'phone-who' },
                 h('strong', {}, d.name),
                 h('span', { class: 'note' }, `${d.tailscaleLogin} · last seen ${agoLong(d.lastSeenAt)}`),
-                h(
-                  'label',
-                  { class: 'toggle' },
-                  h('input', {
-                    type: 'checkbox',
-                    checked: d.scopes.includes('decide'),
-                    onchange: (e) => setPhoneScopes(d, e.target.checked ? uniq([...d.scopes, 'decide']) : d.scopes.filter((x) => x !== 'decide')),
-                  }),
-                  'Can mark decisions',
-                ),
+                scopeToggles(d),
               ),
               disconnectButton('Disconnect', 'Click again to disconnect', () => api(`/api/devices/${encodeURIComponent(d.id)}`, { method: 'DELETE' })),
             ),
@@ -2539,7 +2855,7 @@ function renderPhones() {
       pair,
       waiting,
       paired,
-      h('p', { class: 'note' }, 'A phone can read sessions, and mark decisions if you let it. It can’t open terminals, rescan or change settings. Each phone works only for the Tailscale account that paired it.'),
+      h('p', { class: 'note' }, 'A phone can always read sessions and follow runs. Agents it starts run on this computer, in Plan only unless you allow editing, and only in folders where you’ve used that tool. It can’t open terminals, rescan or change settings. Each phone works only for the Tailscale account that paired it.'),
     ),
   );
 }
@@ -2751,6 +3067,22 @@ function connectEvents() {
       select(open, { focusReader: false, keepPlace: true });
     }
   });
+  // Runs: state changes, and what the agent is doing
+  es.addEventListener('run', (e) => {
+    try {
+      upsertRun(JSON.parse(e.data));
+    } catch {
+      /* ignore */
+    }
+  });
+  es.addEventListener('run-event', (e) => {
+    try {
+      const { runId, events } = JSON.parse(e.data);
+      addRunEvents(runId, events);
+    } catch {
+      /* ignore */
+    }
+  });
   // Phone mode, on this computer: a phone asked to pair, or the list changed
   es.addEventListener('devices', (e) => {
     try {
@@ -2779,6 +3111,13 @@ async function start() {
     if (board.capabilities?.device && prefs.get('view', null) == null) state.view = 'list';
     setBoard(board);
     if (board.capabilities?.pairPhones) loadDevices();
+    api('/api/runs')
+      .then((r) => {
+        setRuns(r.runs);
+        render();
+        refreshRuns();
+      })
+      .catch(() => {});
     if (state.view === 'canvas') fit();
     const fromHash = decodeURIComponent(location.hash.slice(1));
     if (fromHash && state.byId.has(fromHash)) {
