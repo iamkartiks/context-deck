@@ -42,6 +42,20 @@ describe('headless drivers: arguments', () => {
     });
   });
 
+  it('builds an “ask me first” command for Claude Code: manual mode, every request to the approver', () => {
+    assert.deepEqual(claudeCodeHeadless.continueArgs(session(), 'ask', { mcpConfig: '/tmp/x/mcp.json', tool: 'mcp__contextdeck__approve' }).args.slice(-6), [
+      '--permission-mode',
+      'manual',
+      '--mcp-config',
+      '/tmp/x/mcp.json',
+      '--permission-prompt-tool',
+      'mcp__contextdeck__approve',
+    ]);
+    assert.equal(claudeCodeHeadless.supportsAsk, true);
+    assert.equal(codexHeadless.supportsAsk, false);
+    assert.equal(qwenCodeHeadless.supportsAsk, false);
+  });
+
   it('builds exactly these commands (Codex), with the sandbox in config too', () => {
     const id = '019a2f3c-5d6e-7f80-91a2-b3c4d5e6f701';
     assert.deepEqual(codexHeadless.continueArgs(session({ nativeId: id }), 'plan'), {
@@ -83,14 +97,22 @@ describe('headless drivers: arguments', () => {
       /^--approval-mode=/,
     ];
     const ALLOWED_VALUE: Record<string, string[]> = {
-      '--permission-mode': ['plan', 'acceptEdits'],
+      '--permission-mode': ['plan', 'acceptEdits', 'manual'],
       '--approval-mode': ['plan', 'auto-edit'],
       '--sandbox': ['read-only', 'workspace-write'],
       '--permission-prompts': ['none'],
+      '--permission-prompt-tool': ['mcp__contextdeck__approve'],
+      '--mcp-config': ['/tmp/cd-run-x/mcp.json'],
     };
+    const approver = { mcpConfig: '/tmp/cd-run-x/mcp.json', tool: 'mcp__contextdeck__approve' };
     for (const [name, d] of DRIVERS) {
       for (const mode of RUN_MODES) {
-        for (const cmd of [d.continueArgs(session(), mode), d.startArgs(CWD, mode)]) {
+        if (mode === 'ask' && !d.supportsAsk) {
+          assert.throws(() => d.continueArgs(session(), mode), /can’t ask for approval here/, name);
+          assert.throws(() => d.startArgs(CWD, mode), /can’t ask for approval here/, name);
+          continue;
+        }
+        for (const cmd of [d.continueArgs(session(), mode, approver), d.startArgs(CWD, mode, approver)]) {
           const where = `${name} ${mode}: ${cmd.args.join(' ')}`;
           for (const a of cmd.args) for (const re of FORBIDDEN) assert.doesNotMatch(a, re, where);
           cmd.args.forEach((a, i) => {
@@ -98,9 +120,17 @@ describe('headless drivers: arguments', () => {
             if (a === '-c') assert.match(cmd.args[i + 1]!, /^(sandbox_mode="(read-only|workspace-write)"|approval_policy="never")$/, where);
           });
           // Plan only never allows writes
-          if (mode === 'plan') assert.doesNotMatch(cmd.args.join(' '), /acceptEdits|auto-edit|workspace-write/, where);
+          if (mode === 'plan') assert.doesNotMatch(cmd.args.join(' '), /acceptEdits|auto-edit|workspace-write|manual/, where);
+          // Ask me first: every request goes to the approver, and nothing turns prompts off
+          if (mode === 'ask') {
+            assert.ok(cmd.args.includes('--permission-prompt-tool'), where);
+            assert.ok(!cmd.args.includes('--permission-prompts'), where);
+          } else {
+            assert.ok(!cmd.args.includes('--permission-prompt-tool') && !cmd.args.includes('--mcp-config'), where);
+          }
         }
       }
+      if (d.supportsAsk) assert.throws(() => d.startArgs(CWD, 'ask'), /needs ContextDeck’s approver/, name);
     }
   });
 

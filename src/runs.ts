@@ -1,9 +1,12 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { delimiter, extname, isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { APPROVER_SERVER, APPROVER_TOOL_NAME, type ApprovalHub } from './approvals.js';
 import { getAdapter } from './adapters/index.js';
-import { RUN_MODES, type HeadlessCommand, type RunEvent, type RunMode } from './adapters/types.js';
+import { RUN_MODES, type Approver, type HeadlessCommand, type RunEvent, type RunMode } from './adapters/types.js';
 import { appendAudit } from './audit.js';
 import { finalizeBrief, saveBrief } from './handoff.js';
 import { HANDOFF_ID_RE } from './handoff-marker.js';
@@ -108,7 +111,13 @@ export interface RunManagerOptions {
   onChange?: (run: RunInfo) => void;
   onEvents?: (runId: string, events: RunEvent[]) => void;
   onIndexed?: (summary: IndexSummary) => void;
+  /** Where "ask me first" runs send permission requests. Without it, `ask` is refused. */
+  approvals?: ApprovalHub;
+  /** How Claude Code starts the approver (tests). Default: this Node running `contextdeck approver`. */
+  approverCommand?: { command: string; args: string[] };
 }
+
+const CLI = fileURLToPath(new URL('../../bin/contextdeck.js', import.meta.url));
 
 const MAX_PROMPT = 200_000;
 const MAX_LINE = 1024 * 1024;
@@ -116,6 +125,7 @@ const MAX_EVENTS = 2000;
 const KEEP_RUNS = 50;
 const KEEP_DAYS = 7;
 const RUN_ID_RE = /^run_[0-9a-f]{10}$/;
+const RUN_MODE_ERR = 'Expected "mode" to be "plan", "edit" or "ask".';
 
 export const isRunId = (id: string) => RUN_ID_RE.test(id);
 
@@ -134,12 +144,14 @@ interface Live {
   failReason: string | null;
   stderr: string;
   finished: boolean;
+  /** For ask runs: the private folder holding the approver's MCP config. */
+  approverDir: string | null;
 }
 
 export class RunManager {
   private readonly runs = new Map<string, Live>();
   private readonly order: string[] = [];
-  private readonly o: Required<Omit<RunManagerOptions, 'wrapCommand' | 'onChange' | 'onEvents' | 'onIndexed'>> & RunManagerOptions;
+  private readonly o: Required<Omit<RunManagerOptions, 'wrapCommand' | 'onChange' | 'onEvents' | 'onIndexed' | 'approvals' | 'approverCommand'>> & RunManagerOptions;
 
   constructor(opts: RunManagerOptions) {
     this.o = {
@@ -164,11 +176,11 @@ export class RunManager {
     const kind = req.kind as RunKind;
     if (!RUN_KINDS.includes(kind)) throw new RunError(400, 'Expected "kind" to be "resume", "new" or "handoff".');
     const mode = req.mode as RunMode;
-    if (!RUN_MODES.includes(mode)) throw new RunError(400, 'Expected "mode" to be "plan" or "edit".');
+    if (!RUN_MODES.includes(mode)) throw new RunError(400, RUN_MODE_ERR);
 
     let provider: string;
     let cwd: string;
-    let command: HeadlessCommand;
+    let build: (approver?: Approver) => HeadlessCommand;
     let prompt: string;
     let sessionId: string | null = null;
     let fromSessionId: string | null = null;
@@ -180,7 +192,7 @@ export class RunManager {
       provider = s.provider;
       cwd = this.folder(s.cwd);
       this.checkTrust(provider, cwd);
-      command = this.driver(provider).continueArgs(s, mode);
+      build = (a) => this.driver(provider).continueArgs(s, mode, a);
       prompt = this.prompt(req.prompt);
       sessionId = s.id;
     } else if (kind === 'new') {
@@ -188,7 +200,7 @@ export class RunManager {
       if (typeof req.cwd !== 'string' || !isAbsolute(req.cwd)) throw new RunError(400, 'Expected "cwd" to be a full folder path.');
       cwd = this.folder(resolve(req.cwd));
       this.checkTrust(provider, cwd);
-      command = this.driver(provider).startArgs(cwd, mode);
+      build = (a) => this.driver(provider).startArgs(cwd, mode, a);
       prompt = this.prompt(req.prompt);
     } else {
       const from = this.session(req.sessionId);
@@ -197,26 +209,46 @@ export class RunManager {
       if (typeof req.brief !== 'string') throw new RunError(400, 'Expected "brief".');
       cwd = this.folder(from.cwd);
       this.checkTrust(provider, cwd);
-      command = this.driver(provider).startArgs(cwd, mode);
+      build = (a) => this.driver(provider).startArgs(cwd, mode, a);
       try {
         prompt = finalizeBrief(req.brief, req.handoffId, from.id);
       } catch (err) {
         throw new RunError(400, (err as Error).message);
       }
-      saveBrief(this.o.home, req.handoffId, prompt);
       fromSessionId = from.id;
       handoffId = req.handoffId;
     }
-    this.checkSpawnable(command, provider);
+    if (mode === 'ask') {
+      const label = getAdapter(provider)?.label ?? provider;
+      if (!this.driver(provider).supportsAsk) throw new RunError(400, `${label} can’t ask for approval here. Choose Plan only or Edit this folder.`);
+      if (!this.o.approvals) throw new RunError(501, 'Approvals aren’t available here.');
+    }
+    // Check the command can be built before anything is set up for it
+    const draft = build(mode === 'ask' ? { mcpConfig: '-', tool: APPROVER_TOOL_NAME } : undefined);
+    this.checkSpawnable(draft, provider);
 
     const waiting = [...this.runs.values()].filter((r) => r.info.state === 'queued');
     if (waiting.length >= this.o.maxQueued) throw new RunError(429, 'Too many runs are waiting. Wait for some to finish, or stop one.');
     if (sessionId && waiting.filter((r) => r.info.sessionId === sessionId).length >= this.o.maxQueuedPerSession) {
       throw new RunError(429, `${this.o.maxQueuedPerSession} messages are already waiting for this session. Wait for them, or stop one.`);
     }
+    if (kind === 'handoff') saveBrief(this.o.home, req.handoffId as string, prompt);
+
+    const id = `run_${randomBytes(5).toString('hex')}`;
+    // Ask me first: a private MCP config that starts the approver for this run only
+    let approverDir: string | null = null;
+    let command = draft;
+    if (mode === 'ask') {
+      approverDir = mkdtempSync(join(tmpdir(), 'cd-run-'));
+      const mcpConfig = join(approverDir, 'mcp.json');
+      const launcher = this.o.approverCommand ?? { command: process.execPath, args: [CLI, 'approver'] };
+      const env = this.o.approvals!.register(id, cwd);
+      writeFileSync(mcpConfig, JSON.stringify({ mcpServers: { [APPROVER_SERVER]: { type: 'stdio', command: launcher.command, args: launcher.args, env } } }), { mode: 0o600 });
+      command = build({ mcpConfig, tool: APPROVER_TOOL_NAME });
+    }
 
     const info: RunInfo = {
-      id: `run_${randomBytes(5).toString('hex')}`,
+      id,
       kind,
       provider,
       providerLabel: getAdapter(provider)?.label ?? provider,
@@ -249,6 +281,7 @@ export class RunManager {
       failReason: null,
       stderr: '',
       finished: false,
+      approverDir,
     };
     this.runs.set(info.id, live);
     this.order.push(info.id);
@@ -454,6 +487,7 @@ export class RunManager {
     r.timers = [];
     r.awake?.kill();
     r.awake = null;
+    this.forgetApprover(r);
     const info = r.info;
     if (r.done?.summary) info.summary = redact(r.done.summary);
     if (r.done?.costUsd != null) info.costUsd = r.done.costUsd;
@@ -487,6 +521,14 @@ export class RunManager {
     this.pump();
   }
 
+  /** The run is over: deny what it still waits for, and delete its approver config. */
+  private forgetApprover(r: Live): void {
+    if (r.info.mode !== 'ask') return;
+    this.o.approvals?.unregister(r.info.id);
+    if (r.approverDir) rmSync(r.approverDir, { recursive: true, force: true });
+    r.approverDir = null;
+  }
+
   // ── Stopping ────────────────────────────────────────────────────────────
 
   /** Stop a run: a waiting one at once, a running one gently, then firmly. */
@@ -500,6 +542,7 @@ export class RunManager {
       r.info.reason = reason;
       r.info.endedAt = new Date().toISOString();
       r.prompt = '';
+      this.forgetApprover(r);
       this.log(r, { type: 'end', run: r.info });
       appendAudit(this.o.home, { action: 'run-ended', runId: r.info.id, state: 'stopped' });
       this.changed(r);

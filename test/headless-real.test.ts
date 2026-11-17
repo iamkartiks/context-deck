@@ -69,3 +69,49 @@ for (const [name, envVar, driver] of [
     });
   });
 }
+
+/**
+ * Ask me first, with the real Claude Code (opt in with CONTEXTDECK_REAL_CLAUDE=1).
+ * Checks the documented-only part of the approver contract: that Claude Code
+ * calls it with fields ContextDeck can read (a tool name and its input), and
+ * that an "allow" lets the call go ahead.
+ */
+describe('real Claude Code, ask me first (opt in with CONTEXTDECK_REAL_CLAUDE=1)', { skip: process.env.CONTEXTDECK_REAL_CLAUDE !== '1' }, () => {
+  it('sends a readable request to the approver, and an allow lets it run', { timeout: 600_000 }, async () => {
+    const { ApprovalHub } = await import('../src/approvals.js');
+    const { RunManager } = await import('../src/runs.js');
+    const { loadConfig } = await import('../src/config.js');
+    const { Store } = await import('../src/store.js');
+    const { dir, cleanup } = gitFolder();
+    const home = join(dir, '..', 'home');
+    const cfg = loadConfig({ home, claudeDir: join(dir, '..', 'claude'), codexDir: join(dir, '..', 'codex'), qwenDir: join(dir, '..', 'qwen') }, {});
+    const store = new Store(cfg.dbPath);
+    const stub = Object.create(store) as InstanceType<typeof Store>;
+    stub.providersInFolder = () => ['claude-code'];
+    const hub = new ApprovalHub({ home, timeoutMs: 120_000 });
+    await hub.start();
+    const seen: { tool: string; kind: string }[] = [];
+    hub.listen((a, change) => {
+      if (change !== 'asked') return;
+      seen.push({ tool: a.tool, kind: a.detail.kind });
+      hub.answer(a.id, true, { deviceId: null, name: 'This computer' });
+    });
+    const m = new RunManager({ store: stub, sources: cfg.sources, home, keepAwake: false, approvals: hub });
+    try {
+      const run = m.start({ kind: 'new', to: 'claude-code', cwd: dir, mode: 'ask', prompt: 'Create a file named made-by-agent.txt in the current folder containing the word hi. Do it now with a file tool, without asking me first in text.' }, { deviceId: null, name: 'test' });
+      const end = Date.now() + 300_000;
+      while (!['done', 'failed', 'stopped'].includes(m.get(run.id)!.run.state) && Date.now() < end) await new Promise((r) => setTimeout(r, 250));
+      const done = m.get(run.id)!;
+      process.stdout.write(`# ask me first: ${done.run.state}; requests: ${JSON.stringify(seen)}; events: ${done.events.map((e) => e.type).join(', ')}\n`);
+      assert.ok(seen.length >= 1, `the approver was never asked; run ${done.run.state}: ${done.run.reason ?? ''}`);
+      assert.notEqual(seen[0]!.tool, 'tool', 'the request had no readable tool name');
+      assert.notEqual(seen[0]!.kind, 'other', 'the request input wasn’t recognised');
+      assert.ok(existsSync(join(dir, 'made-by-agent.txt')), 'allowed, but the file wasn’t written');
+    } finally {
+      await m.stopAll();
+      await hub.close();
+      store.close();
+      cleanup();
+    }
+  });
+});

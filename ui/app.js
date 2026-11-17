@@ -249,6 +249,7 @@ const state = {
   runs: new Map(), // run id → run (agents started from here or a phone)
   runEvents: new Map(), // run id → its events, for runs being shown
   openRun: null, // the run expanded in the reader
+  approvals: new Map(), // approval id → a request waiting for an answer (if this page may answer)
 };
 
 /** What this page may do (a phone sees only what its scopes allow). */
@@ -2097,20 +2098,83 @@ function elapsed(run) {
   return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
 }
 
-/** Plan only, or (if this page may) edit files in the folder, named in full. */
-function modePicker(cwd) {
+/**
+ * Plan only; or, if this page may, edit files in the folder (named in full),
+ * or ask first (tools that can send their permission requests here).
+ */
+function modePicker(cwd, provider) {
   const name = `run-mode-${++runPickers}`;
+  const tool = runCaps().tools.find((t) => t.id === provider);
   const plan = h('input', { type: 'radio', name, value: 'plan', checked: true });
   const edit = runCaps().edit ? h('input', { type: 'radio', name, value: 'edit' }) : null;
+  const ask = runCaps().ask && tool?.ask ? h('input', { type: 'radio', name, value: 'ask' }) : null;
   const el = h(
     'fieldset',
     { class: 'mode-picker' },
     h('legend', { class: 'visually-hidden' }, 'What the agent may do'),
     h('label', {}, plan, h('span', {}, h('strong', {}, 'Plan only'), ' (no changes)')),
+    ask ? h('label', {}, ask, h('span', {}, h('strong', {}, 'Ask me first'), ': it may edit and run commands in ', h('code', {}, cwd), ' after you allow each one')) : null,
     edit ? h('label', {}, edit, h('span', {}, h('strong', {}, 'Edit files in '), h('code', {}, cwd))) : null,
-    !edit && isPhone() ? h('p', { class: 'note' }, 'This phone can start Plan only runs. Editing files can be allowed on your computer, under Phones.') : null,
+    runCaps().ask && tool && !tool.ask ? h('p', { class: 'note' }, `${tool.label} can’t ask for approval here. Choose Plan only${edit ? ' or Edit this folder' : ''}.`) : null,
+    !edit && !ask && isPhone() ? h('p', { class: 'note' }, 'This phone can start Plan only runs. More can be allowed on your computer, under Phones.') : null,
   );
-  return { el, value: () => (edit?.checked ? 'edit' : 'plan') };
+  return { el, value: () => (edit?.checked ? 'edit' : ask?.checked ? 'ask' : 'plan') };
+}
+
+const modeLabel = (run) => (run.mode === 'edit' ? `Edit files in ${run.cwd}` : run.mode === 'ask' ? `Asks before changes in ${run.cwd}` : 'Plan only');
+
+// ── Approvals ──
+// An "ask me first" run sends each request here, to this computer and to
+// phones that may answer them.
+
+function setApprovals(list) {
+  state.approvals = new Map(list.map((a) => [a.id, a]));
+  refreshRuns();
+}
+
+function onApproval({ approval, change }) {
+  if (change === 'asked') {
+    state.approvals.set(approval.id, approval);
+    const run = state.runs.get(approval.runId);
+    toast(`${run?.providerLabel ?? 'An agent'} is asking to use ${approval.tool}. Open the session to answer.`);
+  } else state.approvals.delete(approval.id);
+  refreshRuns();
+}
+
+async function answerApproval(a, allow) {
+  try {
+    await api(`/api/approvals/${encodeURIComponent(a.id)}`, { method: 'POST', body: { allow } });
+    state.approvals.delete(a.id);
+    refreshRuns();
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+/** One request: what it wants to do, where, and Allow once / Deny. */
+function approvalCard(a) {
+  const d = a.detail;
+  const body =
+    d.kind === 'command'
+      ? [d.description ? h('p', { class: 'note' }, d.description) : null, h('pre', { class: 'ap-code' }, d.command)]
+      : d.kind === 'edit'
+        ? [h('p', { class: 'ap-path' }, d.path), ...d.changes.map((c) => h('div', { class: 'ap-diff' }, h('pre', { class: 'ap-before' }, c.before), h('pre', { class: 'ap-after' }, c.after)))]
+        : d.kind === 'write'
+          ? [h('p', { class: 'ap-path' }, `New file: ${d.path}`), h('pre', { class: 'ap-after' }, d.text)]
+          : [h('pre', { class: 'ap-code' }, d.text)];
+  return h(
+    'div',
+    { class: 'approval', role: 'group', 'aria-label': `Request to use ${a.tool}` },
+    h('p', { class: 'ap-title' }, h('strong', {}, 'Allow '), h('code', {}, a.tool), h('strong', {}, '?')),
+    body,
+    h('p', { class: 'note' }, `In ${a.cwd}. Denied by itself ${agoLong(a.expiresAt)} if nobody answers.`),
+    h(
+      'div',
+      { class: 'actions' },
+      h('button', { type: 'button', class: 'pill solid small', onclick: () => answerApproval(a, true) }, 'Allow once'),
+      h('button', { type: 'button', class: 'pill outline small', onclick: () => answerApproval(a, false) }, 'Deny'),
+    ),
+  );
 }
 
 function mergeRunEvents(list, events) {
@@ -2199,7 +2263,7 @@ function messageForm(sess) {
     },
   });
   ta.value = messageDrafts.get(sess.id) ?? '';
-  const mode = modePicker(sess.cwd);
+  const mode = modePicker(sess.cwd, sess.provider);
   const form = h(
     'form',
     {
@@ -2238,7 +2302,7 @@ function messageForm(sess) {
 
 function fillRunList(list, sessionId) {
   const runs = runsFor(sessionId).slice(0, 5);
-  const open = runs.find((r) => r.id === state.openRun) ?? runs.find(isLive) ?? runs[0];
+  const open = runs.find((r) => [...state.approvals.values()].some((a) => a.runId === r.id)) ?? runs.find((r) => r.id === state.openRun) ?? runs.find(isLive) ?? runs[0];
   const log = $('.run-log', list);
   const atBottom = !log || log.scrollHeight - log.scrollTop - log.clientHeight < 40;
   list.replaceChildren(...runs.map((r) => runEl(r, r === open, sessionId)));
@@ -2276,9 +2340,16 @@ function runEl(run, expanded, sessionId) {
     h('span', { class: 'run-time', dataset: { runTime: run.id } }, elapsed(run)),
     live && canStopRuns() ? h('button', { type: 'button', class: 'pill outline small', onclick: () => stopRun(run) }, run.state === 'queued' ? 'Cancel' : 'Stop') : null,
   );
-  const meta = h('p', { class: 'note run-meta' }, `${run.mode === 'edit' ? `Edit files in ${run.cwd}` : 'Plan only'} · started by ${run.startedBy.name} ${agoLong(run.queuedAt)}`);
+  const meta = h('p', { class: 'note run-meta' }, `${modeLabel(run)} · started by ${run.startedBy.name} ${agoLong(run.queuedAt)}`);
+  const asking = [...state.approvals.values()].filter((a) => a.runId === run.id);
   if (!expanded) {
-    return h('div', { class: `run ${run.state}` }, head, h('button', { type: 'button', class: 'text-button', onclick: () => ((state.openRun = run.id), refreshRuns()) }, 'Show what it did'));
+    return h(
+      'div',
+      { class: `run ${run.state}` },
+      head,
+      asking.length ? h('p', { class: 'note' }, `${plural(asking.length, 'request')} waiting for you`) : null,
+      h('button', { type: 'button', class: 'text-button', onclick: () => ((state.openRun = run.id), refreshRuns()) }, asking.length ? 'Answer' : 'Show what it did'),
+    );
   }
   const events = state.runEvents.get(run.id);
   if (!events) loadRunEvents(run.id);
@@ -2303,6 +2374,7 @@ function runEl(run, expanded, sessionId) {
     head,
     meta,
     log,
+    asking.map(approvalCard),
     run.reason && run.state !== 'done' ? h('p', { class: run.state === 'failed' ? 'warn' : 'note' }, run.reason) : null,
     other ? h('button', { type: 'button', class: 'pill outline small', onclick: () => select(run.sessionId) }, `Open the new ${run.providerLabel} session`) : null,
     run.state === 'done' && run.kind !== 'resume' && !other ? h('p', { class: 'note' }, 'The new session shows up here once it’s been read.') : null,
@@ -2434,7 +2506,7 @@ function renderComposer(text) {
 
   // Run it here in the background (or, from a phone, on the computer) and watch it
   const canRun = runCaps().handoff && canRunTool(c.to) && !!p.cwd && p.cwdExists !== false;
-  const mode = canRun ? modePicker(p.cwd) : null;
+  const mode = canRun ? modePicker(p.cwd, c.to) : null;
   const runInBackground = async () => {
     busy(true);
     try {
@@ -2726,6 +2798,7 @@ const SCOPE_LABELS = [
   ['handoff', 'Hand off sessions to an agent'],
   ['run', 'Send messages to sessions, and stop runs'],
   ['edit', 'Let agents edit files (otherwise Plan only)'],
+  ['approve', 'Answer an agent’s requests (Ask me first)'],
 ];
 
 /** What a phone may do, one checkbox per scope. "Edit files" only counts with handoff or run. */
@@ -3083,6 +3156,13 @@ function connectEvents() {
       /* ignore */
     }
   });
+  es.addEventListener('approval', (e) => {
+    try {
+      onApproval(JSON.parse(e.data));
+    } catch {
+      /* ignore */
+    }
+  });
   // Phone mode, on this computer: a phone asked to pair, or the list changed
   es.addEventListener('devices', (e) => {
     try {
@@ -3118,6 +3198,7 @@ async function start() {
         refreshRuns();
       })
       .catch(() => {});
+    if (board.capabilities?.approve) api('/api/approvals').then((r) => setApprovals(r.approvals), () => {});
     if (state.view === 'canvas') fit();
     const fromHash = decodeURIComponent(location.hash.slice(1));
     if (fromHash && state.byId.has(fromHash)) {

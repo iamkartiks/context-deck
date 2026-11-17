@@ -23,6 +23,8 @@ export interface AuditEntry {
     | 'device-scopes'
     | 'run-started'
     | 'run-ended'
+    | 'approval-asked'
+    | 'approval-answered'
     | 'write';
   deviceId?: string;
   pendingId?: string;

@@ -1,5 +1,5 @@
 import type { SessionRow } from '../schema.js';
-import type { HeadlessCommand, HeadlessDriver, RunEvent, RunMode } from './types.js';
+import type { Approver, HeadlessCommand, HeadlessDriver, RunEvent, RunMode } from './types.js';
 
 /**
  * Headless drivers: how to run one turn of each tool without a terminal, and
@@ -198,23 +198,45 @@ export function parseCodexLine(line: string): RunEvent[] {
  * workspace trust dialog, which is why the run manager only runs in folders
  * where this tool already has sessions.
  */
-const CLAUDE_MODE: Record<RunMode, string> = { plan: 'plan', edit: 'acceptEdits' };
+const CLAUDE_MODE: Record<'plan' | 'edit', string> = { plan: 'plan', edit: 'acceptEdits' };
 const claudeStream = ['--output-format', 'stream-json', '--verbose', '--include-partial-messages'];
+
+/**
+ * How Claude Code decides what needs a person.
+ * - Plan only / Edit this folder: anything that would ask is denied
+ *   (`--permission-prompts none`).
+ * - Ask me first: `--permission-mode manual` (2.1.326 has no "default"
+ *   mode), and every request goes to ContextDeck's approver, an MCP tool
+ *   (`--permission-prompt-tool`). `--permission-prompts` stays at its default,
+ *   "host": with "none", the tool would never be asked.
+ */
+function claudePermissions(mode: RunMode, approver: Approver | undefined): string[] {
+  if (mode !== 'ask') return ['--permission-mode', CLAUDE_MODE[mode], '--permission-prompts', 'none'];
+  if (!approver) throw new Error('An “ask me first” run needs ContextDeck’s approver.');
+  return ['--permission-mode', 'manual', '--mcp-config', approver.mcpConfig, '--permission-prompt-tool', approver.tool];
+}
+
+/** For tools that can't send permission requests anywhere. */
+function noAsk(label: string, mode: RunMode): 'plan' | 'edit' {
+  if (mode === 'ask') throw new Error(`${label} can’t ask for approval here. Choose Plan only or Edit this folder.`);
+  return mode;
+}
 
 export const claudeCodeHeadless: HeadlessDriver = {
   testedWith: 'Claude Code 2.1.326',
   checksFolderTrust: false,
-  continueArgs(session, mode): HeadlessCommand {
+  supportsAsk: true,
+  continueArgs(session, mode, approver): HeadlessCommand {
     return {
       command: bin('CONTEXTDECK_CLAUDE_BIN', 'claude'),
-      args: ['-p', '--resume', sessionId(session), ...claudeStream, '--permission-mode', CLAUDE_MODE[mode], '--permission-prompts', 'none'],
+      args: ['-p', '--resume', sessionId(session), ...claudeStream, ...claudePermissions(mode, approver)],
       cwd: folderOf(session),
     };
   },
-  startArgs(cwd, mode): HeadlessCommand {
+  startArgs(cwd, mode, approver): HeadlessCommand {
     return {
       command: bin('CONTEXTDECK_CLAUDE_BIN', 'claude'),
-      args: ['-p', ...claudeStream, '--permission-mode', CLAUDE_MODE[mode], '--permission-prompts', 'none'],
+      args: ['-p', ...claudeStream, ...claudePermissions(mode, approver)],
       cwd,
     };
   },
@@ -236,23 +258,27 @@ export const claudeCodeHeadless: HeadlessDriver = {
  *   hooks) only for a trusted repository, and runs hooks only with persisted
  *   hook trust (`--dangerously-bypass-hook-trust` overrides that; never used).
  */
-const CODEX_SANDBOX: Record<RunMode, string> = { plan: 'read-only', edit: 'workspace-write' };
-const codexConfig = (mode: RunMode) => ['-c', `sandbox_mode="${CODEX_SANDBOX[mode]}"`, '-c', 'approval_policy="never"'];
+const CODEX_SANDBOX: Record<'plan' | 'edit', string> = { plan: 'read-only', edit: 'workspace-write' };
+const codexConfig = (mode: 'plan' | 'edit') => ['-c', `sandbox_mode="${CODEX_SANDBOX[mode]}"`, '-c', 'approval_policy="never"'];
 
 export const codexHeadless: HeadlessDriver = {
   testedWith: 'codex-cli 0.167.0',
   checksFolderTrust: true,
+  // `exec` can't answer approval prompts (see docs/ROADMAP.md for the open question)
+  supportsAsk: false,
   continueArgs(session, mode): HeadlessCommand {
+    const m = noAsk('Codex', mode);
     return {
       command: bin('CONTEXTDECK_CODEX_BIN', 'codex'),
-      args: ['exec', 'resume', '--json', ...codexConfig(mode), sessionId(session), '-'],
+      args: ['exec', 'resume', '--json', ...codexConfig(m), sessionId(session), '-'],
       cwd: folderOf(session),
     };
   },
   startArgs(cwd, mode): HeadlessCommand {
+    const m = noAsk('Codex', mode);
     return {
       command: bin('CONTEXTDECK_CODEX_BIN', 'codex'),
-      args: ['exec', '--json', '--sandbox', CODEX_SANDBOX[mode], '-C', cwd, ...codexConfig(mode), '-'],
+      args: ['exec', '--json', '--sandbox', CODEX_SANDBOX[m], '-C', cwd, ...codexConfig(m), '-'],
       cwd,
     };
   },
@@ -269,23 +295,25 @@ export const codexHeadless: HeadlessDriver = {
  * Caveat: if Qwen Code's own sandbox is turned on in its settings, it
  * restarts itself with the stdin text added as a `--prompt` argument.
  */
-const QWEN_MODE: Record<RunMode, string> = { plan: 'plan', edit: 'auto-edit' };
+const QWEN_MODE: Record<'plan' | 'edit', string> = { plan: 'plan', edit: 'auto-edit' };
 const qwenStream = ['--output-format', 'stream-json', '--include-partial-messages'];
 
 export const qwenCodeHeadless: HeadlessDriver = {
   testedWith: 'Qwen Code 0.28.0 (options read from the package; not run)',
   checksFolderTrust: false,
+  // How headless Qwen Code handles approvals isn't documented (see docs/ROADMAP.md)
+  supportsAsk: false,
   continueArgs(session, mode): HeadlessCommand {
     return {
       command: bin('CONTEXTDECK_QWEN_BIN', 'qwen'),
-      args: ['--resume', sessionId(session), ...qwenStream, '--approval-mode', QWEN_MODE[mode]],
+      args: ['--resume', sessionId(session), ...qwenStream, '--approval-mode', QWEN_MODE[noAsk('Qwen Code', mode)]],
       cwd: folderOf(session),
     };
   },
   startArgs(cwd, mode): HeadlessCommand {
     return {
       command: bin('CONTEXTDECK_QWEN_BIN', 'qwen'),
-      args: [...qwenStream, '--approval-mode', QWEN_MODE[mode]],
+      args: [...qwenStream, '--approval-mode', QWEN_MODE[noAsk('Qwen Code', mode)]],
       cwd,
     };
   },

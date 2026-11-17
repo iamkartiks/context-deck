@@ -2883,3 +2883,53 @@ mark {
   opacity: 0.55;
   cursor: default;
 }
+
+/* ── Approvals ─────────────────────────────────────────────────────────── */
+
+.approval {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1.5px solid var(--ink);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 22%, var(--surface));
+}
+.approval .actions {
+  display: flex;
+  gap: 8px;
+}
+.ap-title code,
+.ap-path {
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.ap-code,
+.ap-before,
+.ap-after {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--panel);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ap-diff {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ap-before {
+  border-left: 3px solid var(--muted);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--ink) 35%, transparent);
+}
+.ap-after {
+  border-left: 3px solid var(--ink);
+}

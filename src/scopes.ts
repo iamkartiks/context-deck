@@ -48,6 +48,8 @@ export const ROUTES: readonly RouteRule[] = [
   { method: 'GET', path: '/api/runs/*', access: 'view' },
   { method: 'POST', path: '/api/runs', access: 'runs' },
   { method: 'DELETE', path: '/api/runs/*', access: 'run' },
+  { method: 'GET', path: '/api/approvals', access: 'approve' },
+  { method: 'POST', path: '/api/approvals/*', access: 'approve' },
 
   // Never from another device
   { method: 'POST', path: '/api/open-terminal', access: 'local' },
@@ -80,10 +82,13 @@ export function routeAccess(method: string, path: string): RouteAccess | null {
 
 /**
  * The scopes a phone needs to start a run: `handoff` to hand off a session,
- * `run` to resume one or start a new one, plus `edit` for "Edit this folder".
+ * `run` to resume one or start a new one, plus `edit` for "Edit this folder"
+ * or `approve` for "Ask me first".
  */
 export function runScopes(kind: string, mode: string): Scope[] {
   const scopes: Scope[] = [kind === 'handoff' ? 'handoff' : 'run'];
-  if (mode !== 'plan') scopes.push('edit');
+  if (mode === 'edit') scopes.push('edit');
+  // Ask me first: the agent may do what someone allows, so the phone must be able to answer
+  else if (mode !== 'plan') scopes.push('approve');
   return scopes;
 }
