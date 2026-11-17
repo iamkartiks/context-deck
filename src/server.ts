@@ -81,6 +81,7 @@ const STATIC: Record<string, { file: string; type: string }> = {
   '/app.js': { file: 'app.js', type: 'text/javascript; charset=utf-8' },
   '/style.css': { file: 'style.css', type: 'text/css; charset=utf-8' },
   '/favicon.svg': { file: 'favicon.svg', type: 'image/svg+xml' },
+  '/manifest.webmanifest': { file: 'manifest.webmanifest', type: 'application/manifest+json; charset=utf-8' },
   '/fonts/geist-latin-wght-normal.woff2': { file: 'fonts/geist-latin-wght-normal.woff2', type: 'font/woff2' },
   '/fonts/geist-latin-ext-wght-normal.woff2': { file: 'fonts/geist-latin-ext-wght-normal.woff2', type: 'font/woff2' },
   '/fonts/geist-mono-latin-wght-normal.woff2': { file: 'fonts/geist-mono-latin-wght-normal.woff2', type: 'font/woff2' },
@@ -108,6 +109,7 @@ const CSP = [
   "font-src 'self'",
   "img-src 'self' data:",
   "connect-src 'self'",
+  "manifest-src 'self'",
   "base-uri 'none'",
   "form-action 'none'",
   "frame-ancestors 'none'",
@@ -374,7 +376,29 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
 
   // ── API handlers ─────────────────────────────────────────────────────────
 
-  const board = () => {
+  /**
+   * What this page may do, so it only shows controls that will work. A phone
+   * sees what its scopes allow; the server enforces the same rules anyway.
+   */
+  const capabilitiesFor = (ctx: RequestContext) => {
+    const scopes = ctx.device?.scopes ?? null;
+    const may = (scope: string) => !ctx.remote || !!scopes?.includes(scope as never);
+    return {
+      openTerminal: canOpenTerminal && !ctx.remote,
+      terminalName: ctx.remote ? null : (terminal?.name ?? null),
+      // Starting a handoff opens a terminal on this computer, so phones can't yet
+      handoffTargets: ctx.remote ? [] : handoffTargets().map((a) => ({ id: a.id, label: a.label })),
+      decide: may('decide'),
+      arrange: !ctx.remote,
+      rescan: !ctx.remote,
+      meaningSettings: !ctx.remote,
+      /** Phone mode is on and this is the computer: it can pair and manage phones. */
+      pairPhones: !!phoneHost && !ctx.remote,
+      device: ctx.device ? { id: ctx.device.id, name: ctx.device.name, scopes: ctx.device.scopes } : null,
+    };
+  };
+
+  const board = (ctx: RequestContext) => {
     const graph = store.workstreams();
     const sessions = store.listSessions({ limit: 5000 });
     return {
@@ -392,11 +416,7 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       lastIndex,
       meaning: meaning.status(),
       sources: cfg.sources.map((s) => ({ provider: s.adapter.id, label: s.adapter.label, root: s.root })),
-      capabilities: {
-        openTerminal: canOpenTerminal,
-        terminalName: terminal?.name ?? null,
-        handoffTargets: handoffTargets().map((a) => ({ id: a.id, label: a.label })),
-      },
+      capabilities: capabilitiesFor(ctx),
     };
   };
 
@@ -567,7 +587,7 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       return;
     }
 
-    if (method === 'GET' && path === '/api/board') return send(res, 200, board());
+    if (method === 'GET' && path === '/api/board') return send(res, 200, board(ctx));
 
     if (method === 'GET' && path.startsWith('/api/session/')) {
       const ref = decodeURIComponent(path.slice('/api/session/'.length));

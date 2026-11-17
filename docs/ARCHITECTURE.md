@@ -127,8 +127,24 @@ Off unless turned on (`~/.contextdeck/config.json`); while off, no code path tal
 | `POST /api/open-terminal` | Run a session's resume command in a new terminal window (501 when none is available) |
 | `GET /api/handoff/preview?id=&to=&checkIn=` | Build a brief for a handoff, with its size and the target's window |
 | `POST /api/handoff` | Save a (possibly edited) brief and return the start command; with `launch: true`, open it in a new terminal window |
+| `POST /api/pair` · `GET /api/pair/status` | Phone mode, from the phone: ask to pair with a one-time code, then check whether this computer allowed it |
+| `POST /api/pair/code` | Phone mode, on this computer: a new pairing code, its URL and a QR code (SVG) |
+| `GET /api/devices` · `POST /api/devices/pending/:id` · `PUT` / `DELETE /api/devices/:id` | Phone mode, on this computer: list phones and waiting requests, allow or deny one, set a phone's scopes, disconnect one (or `all`) |
+| `GET /manifest.webmanifest` | The web app manifest, so a phone can add ContextDeck to its home screen |
 
 Writes need the per-run token embedded in the page; see [SECURITY.md](../SECURITY.md) for the full model.
+
+### Phone mode (`src/tailscale.ts`, `src/devices.ts`, `src/pairing.ts`, `src/scopes.ts`, `src/audit.ts`)
+
+`contextdeck ui --phone` lets phones on your tailnet reach the server through Tailscale Serve, which proxies HTTPS to `127.0.0.1`. The server never listens anywhere else.
+
+- **Request context.** Every request is *local* or *remote*, worked out once at the top of the handler. It's remote when its Host is this computer's tailnet name (from `tailscale status --json`), or when it carries a proxy header. Remote requests must carry `Tailscale-User-Login`, which Serve adds.
+- **Devices.** `devices.json` holds paired phones (the SHA-256 of each one's cookie secret, its Tailscale login, its scopes and when it was last seen) and pairing requests waiting for an answer. One-time pairing codes are held in memory (`PairingCodes`), with a rate limit.
+- **Scopes.** `src/scopes.ts` lists every API route once, with what it needs: a scope (`view`, `decide`, and later `handoff`, `run`, `edit`, `approve`), `local` (never from a phone) or `pairing` (the only routes an unpaired phone may call). A test scans `server.ts` and fails if a route is missing from the table, and anything missing is refused remotely anyway.
+- **Capabilities.** `GET /api/board` says what the page may do (`capabilities`), so a phone only shows controls its scopes allow. The server checks again on every request.
+- **Tailscale.** `src/tailscale.ts` runs the `tailscale` CLI with argument lists: it reads status, sets up and removes its Serve entry, and refuses Funnel. Tests use a fake `tailscale` script (`writeFakeTailscale()` in `test/helpers.ts`).
+- **QR codes.** `src/qr.ts` draws them for the terminal and as SVG, using Project Nayuki's generator, vendored in `src/vendor/qrcodegen/` (MIT).
+- **Audit log.** `src/audit.ts` appends one line per pairing event and per phone write to `phone-audit.log`: ids, routes and outcomes only.
 
 ### The canvas (`ui/`)
 
@@ -142,6 +158,7 @@ Writes need the per-run token embedded in the page; see [SECURITY.md](../SECURIT
 - **Design.** The look comes from the "minimal organiser" design: ground `#E4E3DF`, surface `#F7F6F2`, ink `#161616`, one accent (`#F4C95D`, Claude Code), a warm grey (`#B7B3AA`, Codex) and a soft violet (`#B4A7E6`, Qwen Code). Each tool also has its own marker shape (circle, square, diamond), so they're told apart without colour. Tokens are CSS custom properties at the top of `style.css`; Geist and Geist Mono are bundled under `ui/fonts/` (SIL OFL). Cards stay paper-coloured in dark mode.
 - Cards are positioned with the CSS `translate` property, not `transform`: individual transform properties apply before `transform`, so a tilted card positioned with `transform` would also have its position rotated.
 - Browser storage holds only view preferences (view, grouping, hidden tools) and is optional.
+- **On a phone** (`capabilities.device` is set) the page opens in List view, the reader is a full-screen page with **Back**, and controls the phone's scopes don't allow are hidden through classes on `<body>` (`no-decide`, `no-arrange`, …). The header chip says what the phone can do. On the computer, **Phones** pairs and manages phones, and a corner prompt asks about each pairing request.
 
 ## Why these choices
 

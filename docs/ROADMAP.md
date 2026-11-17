@@ -59,6 +59,16 @@ Still to do here:
 - [ ] Handoff from a range of messages, not just the whole session
 - [ ] Hooks for live status ("waiting for you", "done") from tools that support them
 
+## Phase 6: use it from your phone
+
+The phone is a remote screen for ContextDeck on your computer, over your own Tailscale network. No ContextDeck servers, relays or accounts.
+
+- [x] Look and decide: pair a phone with a QR code and approval on the computer; browse, search, read and mark decisions; scopes per phone; disconnect from the computer; audit log
+- [ ] Start work: hand off or resume a session from the phone, with the agent running headless on the computer, in "plan only" or "edit this folder" mode, and its output streamed live
+- [ ] Chat and approve: send messages to a session and answer Claude Code's permission requests from the phone
+- [ ] Find out whether Codex (`codex app-server` or its MCP server mode) can send approval requests to another program
+- [ ] Find out whether Qwen Code's `--input-format stream-json` carries permission requests
+
 ## Non-goals
 
 - Cloud sync or hosted accounts. If it ever happens, it's opt-in and a separate project.

@@ -95,7 +95,8 @@ Claude Code doesn't record how big its context window is, so its fill level is a
 
 | Command | What it does |
 |---|---|
-| `ui` | Open the canvas in your browser (see above). |
+| `ui [--phone]` | Open the canvas in your browser (see above). `--phone` also lets [phones you approve](#use-it-from-your-phone) open it. |
+| `phone [devices\|revoke <id\|all>]` | List the phones you paired, or disconnect them. |
 | `index [--full]` | Scan session files into the index. Incremental: only changed files are re-read. |
 | `list` | Recent sessions across every tool. `--all` includes subagents. |
 | `search <query>` | Full-text search. Words are ANDed; `"exact phrase"`, `prefix*` and `OR` work. Matching decisions are listed first. |
@@ -206,6 +207,33 @@ The **cutoff** is the lowest score a match by meaning needs. It trades those two
 Measured with `qwen3-embedding:0.6b`, word search found none of the right sessions. Search by meaning put the right one first for 25 of 30 questions (English 9, Hindi 8, Hinglish 8), and in the top 3 for 29. Its cutoff now defaults to the measured **0.50**: at that level, 15 of 18 questions with no answer get nothing added (at the old 0.1, none did), with no right answers lost. Other models use a generic cutoff until measured; `semantic enable` tells you when that's the case.
 
 The model server must be on this computer. Pointing ContextDeck at one elsewhere sends your session text there, so it's refused unless you add `--allow-remote` on the command line; the canvas never allows it.
+
+## Use it from your phone
+
+Read your sessions and mark decisions from your phone, while everything stays on your computer. The phone is only a screen: it doesn't store your sessions, and nothing passes through a server you don't own.
+
+It works over [Tailscale](https://tailscale.com), on your own private network (your *tailnet*). You need:
+- Tailscale on your computer and your phone, signed in to the same account;
+- **HTTPS** turned on for your tailnet (DNS page of the Tailscale admin console).
+
+```bash
+contextdeck ui --phone
+```
+
+1. ContextDeck uses Tailscale Serve to make the canvas reachable at `https://<your-computer>.<tailnet>.ts.net/`, on your tailnet only. It never uses Funnel (the public internet), and refuses to start if Funnel is on for that address.
+2. Scan the QR code in the terminal, or under **Phones** in the canvas, with your phone's camera. A code works once, for 5 minutes.
+3. Your computer asks: *Allow Pixel 9 (you@example.com) to open ContextDeck?* Choose **Allow**.
+4. The phone opens ContextDeck in List view. Use **Add to Home Screen** to keep it handy.
+
+| | |
+|---|---|
+| **What a phone can do** | Browse, search and read sessions, and mark or edit decisions. You can turn off **Can mark decisions** for a phone under **Phones**. |
+| **What it can't** | Open terminals, start handoffs, rescan, move cards or change settings. Those stay on the computer. |
+| **Disconnecting** | **Disconnect** under **Phones**, or `contextdeck phone revoke <id\|all>` (`contextdeck phone devices` lists them). The phone loses access straight away. A phone not seen for 30 days is disconnected by itself. |
+| **When it stops** | Phone mode is on only while `contextdeck ui --phone` runs. Ctrl+C removes the Tailscale Serve entry ContextDeck added; nothing else in your Tailscale settings changes. |
+| **Your own Serve setup** | `--phone --no-serve` leaves Tailscale Serve to you. ContextDeck still checks Funnel is off. |
+
+Each phone works only for the Tailscale account that paired it. Every pairing, approval, disconnection and change a phone makes is logged, without any content, in `~/.contextdeck/phone-audit.log`. See [SECURITY.md](SECURITY.md) for how it's protected.
 
 ## Local and open models (Qwen, DeepSeek, …)
 

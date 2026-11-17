@@ -307,6 +307,53 @@ describe('phone scopes', () => {
     assert.equal((await call(t.server.port, '/api/not-a-route', { headers: t.as(secret) })).status, 404);
   });
 
+  it('tells each page what it may do, so phones only see controls that work', async () => {
+    const local = (await call(t.server.port, '/api/board')).json().capabilities;
+    assert.equal(local.device, null);
+    assert.equal(local.pairPhones, true);
+    assert.equal(local.decide, true);
+    assert.equal(local.openTerminal, true);
+    assert.ok(local.handoffTargets.length > 0);
+
+    assert.equal((await call(t.server.port, `/api/devices/${deviceId}`, { method: 'PUT', headers: t.local(), body: { scopes: ['view'] } })).status, 200);
+    const phone = (await call(t.server.port, '/api/board', { headers: t.as(secret) })).json().capabilities;
+    assert.deepEqual(phone.device, { id: deviceId, name: 'Pixel 9', scopes: ['view'] });
+    assert.deepEqual(
+      [phone.pairPhones, phone.decide, phone.openTerminal, phone.arrange, phone.rescan, phone.meaningSettings, phone.handoffTargets.length, phone.terminalName],
+      [false, false, false, false, false, false, 0, null],
+    );
+    await call(t.server.port, `/api/devices/${deviceId}`, { method: 'PUT', headers: t.local(), body: { scopes: ['view', 'decide'] } });
+    assert.equal((await call(t.server.port, '/api/board', { headers: t.as(secret) })).json().capabilities.decide, true);
+  });
+
+  it('serves the web app manifest to paired phones, under the CSP', async () => {
+    const r = await call(t.server.port, '/manifest.webmanifest', { headers: t.as(secret) });
+    assert.equal(r.status, 200);
+    assert.match(String(r.headers['content-type']), /application\/manifest\+json/);
+    assert.equal(JSON.parse(r.body).start_url, '/');
+    const page = await call(t.server.port, '/', { headers: t.as(secret) });
+    assert.match(String(page.headers['content-security-policy']), /manifest-src 'self'/);
+    assert.match(page.body, /rel="manifest" href="\/manifest.webmanifest" crossorigin="use-credentials"/);
+    assert.equal((await call(t.server.port, '/manifest.webmanifest', { headers: remote() })).status, 401, 'not to unpaired devices');
+  });
+
+  it('says on the computer when phone mode is off', async () => {
+    const s2 = scratch();
+    const cfg2 = loadConfig({ home: s2.home, claudeDir: s2.claude, codexDir: s2.codex, qwenDir: s2.qwen }, {});
+    const store2 = new Store(cfg2.dbPath);
+    const plain = await startUiServer(store2, cfg2, { port: 0, watch: false, terminal: null });
+    try {
+      assert.equal((await call(plain.port, '/api/board')).json().capabilities.pairPhones, false);
+      const r = await call(plain.port, '/api/pair/code', { method: 'POST', headers: { 'X-ContextDeck-Token': plain.token } });
+      assert.equal(r.status, 409);
+      assert.equal(plain.pairingCode(), null);
+    } finally {
+      await plain.close();
+      store2.close();
+      s2.cleanup();
+    }
+  });
+
   it('only accepts known scopes, and always view', async () => {
     for (const scopes of [['view', 'root'], ['decide'], 'view', []]) {
       assert.equal((await call(t.server.port, `/api/devices/${deviceId}`, { method: 'PUT', headers: t.local(), body: { scopes } })).status, 400, JSON.stringify(scopes));

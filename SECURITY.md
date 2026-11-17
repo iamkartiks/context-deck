@@ -31,7 +31,7 @@ The UI is served by a small HTTP server that only listens on `127.0.0.1`. Becaus
 - On Windows the brief never goes on a command line. The tool is started with a one-line pointer to the brief file, built only from the session title (special characters removed), the brief's path and the marker. Reading an earlier brief back is done by handoff id, inside ContextDeck's own folder only.
 - Like every other write, `POST /api/handoff` needs the per-run token and a matching Origin. The target must be a known tool.
 
-### Phone mode (`contextdeck ui --phone`, in development)
+### Phone mode (`contextdeck ui --phone`)
 
 Phone mode lets devices on your own Tailscale network reach the canvas through Tailscale Serve, which proxies HTTPS from your tailnet to the server on `127.0.0.1`. It's on only while `contextdeck ui --phone` runs. The server still listens only on `127.0.0.1`.
 

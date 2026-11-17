@@ -2457,3 +2457,213 @@ mark {
     bottom: 12px;
   }
 }
+
+/* ── Phone mode ────────────────────────────────────────────────────────── */
+
+/* What a phone may not do is hidden, not just disabled */
+.no-decide .needs-decide,
+.no-rescan #rescan,
+.no-meaning-settings #meaning-btn {
+  display: none !important;
+}
+.no-arrange .card {
+  cursor: pointer;
+}
+
+.device-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 14px;
+  border: 1px dashed var(--ink);
+  border-radius: 999px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+#phones-btn {
+  position: relative;
+}
+.phones-dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--ground);
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* Back, for the full-screen reader on small screens; the close button is for wide ones */
+.back {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 14px 0 10px;
+  border: 1px solid var(--ink);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+.back svg {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.phones-dialog {
+  width: min(560px, 100%);
+  overflow-y: auto;
+  gap: 20px;
+}
+.phones-dialog .section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.phones-dialog p {
+  margin: 0;
+}
+.phones-dialog .pill {
+  align-self: flex-start;
+}
+.qr-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 18px;
+}
+.qr-wrap > div {
+  display: flex;
+  flex: 1 1 200px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+.qr {
+  display: block;
+  width: 200px;
+  height: 200px;
+  border: 1px solid var(--ink);
+  border-radius: 10px;
+  background: #fff; /* a QR code needs a light background in both themes */
+  image-rendering: pixelated;
+}
+.phone-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+.phone-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.phone-who {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.phone-row .actions,
+.pair-ask .actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* A pairing request waits in the corner until you answer it */
+.pair-ask {
+  position: fixed;
+  z-index: 25;
+  right: 20px;
+  bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(380px, calc(100% - 32px));
+  padding: 18px 20px;
+  background: var(--panel);
+  border: 1px solid var(--ink);
+  border-radius: 16px;
+  box-shadow: 0 18px 48px rgba(22, 22, 22, 0.22);
+}
+.pair-ask h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.pair-ask p {
+  margin: 0;
+}
+
+@media (max-width: 720px) {
+  /* The reader is its own page on a phone, above the header, with Back */
+  .reader {
+    position: fixed;
+    z-index: 15;
+    inset: 0;
+    width: auto;
+  }
+  .back {
+    display: inline-flex;
+  }
+  .reader-head .close {
+    display: none;
+  }
+  .device-chip {
+    height: 34px;
+    padding: 0 10px;
+  }
+  #phones-btn span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .pair-ask {
+    right: 16px;
+    bottom: 16px;
+  }
+}
+
+/* Touch screens: every control is at least 44px to tap */
+@media (pointer: coarse) {
+  .pill,
+  .chip,
+  .tab,
+  .close,
+  .mark-btn,
+  .meaning-btn,
+  .text-button,
+  #rescan,
+  .device-chip {
+    min-height: 44px;
+  }
+  .close,
+  .meaning-btn,
+  #rescan {
+    min-width: 44px;
+  }
+  .toggle {
+    min-height: 44px;
+    align-items: center;
+  }
+}

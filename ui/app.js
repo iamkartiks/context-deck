@@ -116,6 +116,11 @@ async function api(path, { method = 'GET', body } = {}) {
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  // Only a phone gets 401: it was disconnected or expired, so show it the pairing page
+  if (res.status === 401) {
+    location.replace('/');
+    throw new Error('This phone isn’t paired any more.');
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status}).`);
   return data;
@@ -239,7 +244,13 @@ const state = {
   hovered: null,
   loadedAt: null,
   connected: true,
+  devices: null, // phone mode, on this computer: { phone, devices, pending }
+  phonesOpen: false,
 };
+
+/** What this page may do (a phone sees only what its scopes allow). */
+const caps = () => state.board?.capabilities ?? {};
+const isPhone = () => !!caps().device;
 
 const els = {
   board: $('#canvas'),
@@ -262,6 +273,10 @@ const els = {
   chips: $('#tool-filters'),
   rescan: $('#rescan'),
   composer: $('#composer'),
+  deviceChip: $('#device-chip'),
+  phonesBtn: $('#phones-btn'),
+  phones: $('#phones'),
+  pairAsk: $('#pair-ask'),
 };
 
 let toastTimer = 0;
@@ -727,6 +742,7 @@ function attachCardEvents(el) {
   el.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     e.stopPropagation();
+    if (caps().arrange === false) return; // a phone can open cards but not move them
     const p = state.pos.get(el.dataset.id);
     start = { px: e.clientX, py: e.clientY, x: p.x, y: p.y, moving: false };
     dragged = false;
@@ -1496,7 +1512,7 @@ function changedCallout(x) {
     h(
       'div',
       { class: 'd-actions' },
-      h('button', { type: 'button', class: 'pill outline small', onclick: () => patchDecision(x, { stillTrue: true }, 'Marked as still true.') }, 'Still true'),
+      h('button', { type: 'button', class: 'pill outline small needs-decide', onclick: () => patchDecision(x, { stillTrue: true }, 'Marked as still true.') }, 'Still true'),
       h('span', { class: 'note' }, 'If not, mark the new decision and choose this one under “Replaces”.'),
     ),
   );
@@ -1545,7 +1561,7 @@ function removeButton(x) {
     'button',
     {
       type: 'button',
-      class: 'text-button danger',
+      class: 'text-button danger needs-decide',
       onclick: async () => {
         if (!armed) {
           armed = true;
@@ -1602,8 +1618,8 @@ function decisionCard(x, { inReader = false } = {}) {
             )
           : null,
       replaced
-        ? h('button', { type: 'button', class: 'text-button', onclick: () => patchDecision(x, { restore: true }, 'Restored: it’s current again.') }, 'Restore')
-        : h('button', { type: 'button', class: 'text-button', onclick: () => editDecision(card, textEl, x) }, 'Edit'),
+        ? h('button', { type: 'button', class: 'text-button needs-decide', onclick: () => patchDecision(x, { restore: true }, 'Restored: it’s current again.') }, 'Restore')
+        : h('button', { type: 'button', class: 'text-button needs-decide', onclick: () => editDecision(card, textEl, x) }, 'Edit'),
       removeButton(x),
     ),
   );
@@ -1677,7 +1693,7 @@ function messageEl(m, toolName, decisions) {
         'button',
         {
           type: 'button',
-          class: 'mark-btn',
+          class: 'mark-btn needs-decide',
           title: 'Mark this message as a decision. Select part of it first to quote just that.',
           onpointerdown: () => (pendingSelection = selectionIn(body)),
           onclick: () => openDecideForm(el, m, body),
@@ -1951,6 +1967,16 @@ function renderReader({ keepScroll = null } = {}) {
       h(
         'div',
         { class: 'reader-head' },
+        h(
+          'button',
+          { type: 'button', class: 'back', onclick: closeReader },
+          (() => {
+            const svg = s('svg', { width: 14, height: 14, viewBox: '0 0 14 14', 'aria-hidden': 'true' });
+            svg.append(s('path', { d: 'M8.5 2.5 L4 7 L8.5 11.5' }));
+            return svg;
+          })(),
+          'Back',
+        ),
         h('span', { class: 'tool-tag', title: sess.cliVersion ? `version ${sess.cliVersion}` : null }, swatch(sess.provider), tool),
         h(
           'button',
@@ -2219,9 +2245,14 @@ function renderComposer(text) {
     if (e.target === els.composer) closeComposer();
   });
   // Keep Tab inside the dialog
-  els.composer.addEventListener('keydown', (e) => {
+  trapTab(els.composer);
+})();
+
+/** Keep Tab inside a modal dialog. */
+function trapTab(container) {
+  container.addEventListener('keydown', (e) => {
     if (e.key !== 'Tab') return;
-    const items = [...els.composer.querySelectorAll('button:not([disabled]), textarea, input')].filter((x) => x.offsetParent);
+    const items = [...container.querySelectorAll('button:not([disabled]), textarea, input')].filter((x) => x.offsetParent);
     if (!items.length) return;
     const first = items[0];
     const last = items[items.length - 1];
@@ -2233,7 +2264,291 @@ function renderComposer(text) {
       first.focus();
     }
   });
-})();
+}
+
+// ── Phones ────────────────────────────────────────────────────────────────
+// On a phone: hide what it may not do, and say what it can. On this computer,
+// in phone mode: pair phones, answer pairing requests, and manage phones.
+
+function applyCapabilities() {
+  const c = caps();
+  const body = document.body.classList;
+  body.toggle('is-phone', isPhone());
+  body.toggle('no-decide', c.decide === false);
+  body.toggle('no-arrange', c.arrange === false);
+  body.toggle('no-rescan', c.rescan === false);
+  body.toggle('no-meaning-settings', c.meaningSettings === false);
+  els.phonesBtn.hidden = !c.pairPhones;
+  if (c.device) {
+    const scopes = c.device.scopes;
+    const label = scopes.includes('run') || scopes.includes('handoff') ? 'can run agents' : scopes.includes('decide') ? 'can mark decisions' : 'read-only';
+    els.deviceChip.textContent = `Phone · ${label}`;
+    els.deviceChip.title = `${c.device.name}. What this phone may do is set on your computer, under Phones.`;
+    els.deviceChip.hidden = false;
+  } else {
+    els.deviceChip.hidden = true;
+  }
+}
+
+async function loadDevices() {
+  try {
+    setDevices(await api('/api/devices'));
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+function setDevices(view) {
+  state.devices = view;
+  const waiting = view.pending?.length ?? 0;
+  $('.phones-dot', els.phonesBtn).hidden = !waiting;
+  els.phonesBtn.title = waiting ? `${plural(waiting, 'phone')} waiting for you to allow ${waiting === 1 ? 'it' : 'them'}` : 'Pair and manage phones';
+  renderPairAsk();
+  if (state.phonesOpen) renderPhones();
+}
+
+async function answerPairing(p, allow) {
+  try {
+    await api(`/api/devices/pending/${encodeURIComponent(p.id)}`, { method: 'POST', body: { allow } });
+    toast(allow ? `${p.name} can open ContextDeck now.` : `${p.name} wasn’t allowed.`);
+  } catch (err) {
+    toast(err.message);
+  }
+  loadDevices();
+}
+
+/** A pairing request, shown wherever you are until you answer it. */
+function renderPairAsk() {
+  const p = state.devices?.pending?.[0];
+  if (!p || state.phonesOpen) {
+    els.pairAsk.hidden = true;
+    els.pairAsk.replaceChildren();
+    return;
+  }
+  const more = state.devices.pending.length - 1;
+  els.pairAsk.replaceChildren(
+    h('p', { class: 'label' }, 'Pairing request'),
+    h('h2', { id: 'pair-ask-title' }, `Allow ${p.name} (${p.tailscaleLogin}) to open ContextDeck?`),
+    h('p', { class: 'note' }, 'It will be able to read your sessions and mark decisions. Only allow a phone you just scanned the code with.'),
+    h(
+      'div',
+      { class: 'actions' },
+      h('button', { type: 'button', class: 'pill solid', onclick: () => answerPairing(p, true) }, 'Allow'),
+      h('button', { type: 'button', class: 'pill outline', onclick: () => answerPairing(p, false) }, 'Deny'),
+    ),
+    more > 0 ? h('p', { class: 'note' }, `${plural(more, 'more request')} after this one.`) : null,
+  );
+  els.pairAsk.hidden = false;
+}
+
+function openPhones() {
+  state.phonesOpen = { returnFocus: document.activeElement, code: null };
+  renderPairAsk();
+  renderPhones();
+  els.phones.hidden = false;
+  setBackgroundInert(true);
+  $('.composer', els.phones)?.querySelector('button')?.focus({ preventScroll: true });
+  loadDevices();
+}
+
+function closePhones() {
+  if (!state.phonesOpen) return;
+  const back = state.phonesOpen.returnFocus;
+  clearInterval(state.phonesOpen.timer);
+  state.phonesOpen = false;
+  setBackgroundInert(false);
+  els.phones.hidden = true;
+  els.phones.replaceChildren();
+  renderPairAsk();
+  if (back?.isConnected) back.focus({ preventScroll: true });
+}
+
+async function showPairingCode() {
+  try {
+    const made = await api('/api/pair/code', { method: 'POST' });
+    if (!state.phonesOpen) return;
+    clearInterval(state.phonesOpen.timer);
+    state.phonesOpen.code = made;
+    // Swap the code for a "make a new one" button once it expires
+    state.phonesOpen.timer = setInterval(() => {
+      if (state.phonesOpen?.code && Date.parse(state.phonesOpen.code.expiresAt) <= Date.now()) {
+        state.phonesOpen.code = null;
+        clearInterval(state.phonesOpen.timer);
+        renderPhones();
+      }
+    }, 5000);
+    renderPhones();
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+async function setPhoneScopes(d, scopes) {
+  try {
+    await api(`/api/devices/${encodeURIComponent(d.id)}`, { method: 'PUT', body: { scopes } });
+  } catch (err) {
+    toast(err.message);
+  }
+  loadDevices();
+}
+
+/** Remove needs a second click within a few seconds, like removing a decision. */
+function disconnectButton(label, confirmLabel, run) {
+  let armed = false;
+  let timer = 0;
+  const btn = h(
+    'button',
+    {
+      type: 'button',
+      class: 'text-button danger',
+      onclick: async () => {
+        if (!armed) {
+          armed = true;
+          btn.textContent = confirmLabel;
+          timer = setTimeout(() => {
+            armed = false;
+            btn.textContent = label;
+          }, 3000);
+          return;
+        }
+        clearTimeout(timer);
+        try {
+          await run();
+        } catch (err) {
+          toast(err.message);
+        }
+        loadDevices();
+      },
+    },
+    label,
+  );
+  return btn;
+}
+
+function renderPhones() {
+  const view = state.devices ?? { devices: [], pending: [] };
+  const code = state.phonesOpen?.code;
+  const until = code ? new Date(code.expiresAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) : '';
+
+  const pair = h(
+    'section',
+    { class: 'section phones-pair' },
+    h('div', { class: 'label' }, 'Pair a phone'),
+    code
+      ? h(
+          'div',
+          { class: 'qr-wrap' },
+          h('img', { class: 'qr', src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(code.svg)}`, alt: 'Pairing QR code', width: 200, height: 200 }),
+          h(
+            'div',
+            {},
+            h('p', {}, 'Scan this with the phone’s camera. Then allow it here.'),
+            h('p', { class: 'note' }, `Works once, until ${until}. The phone must be signed in to your Tailscale network.`),
+            h('button', { type: 'button', class: 'text-button', onclick: showPairingCode }, 'Make a new code'),
+          ),
+        )
+      : h(
+          'div',
+          {},
+          h('p', { class: 'note' }, 'Phones open ContextDeck over your Tailscale network. Nothing is on the public internet.'),
+          h('button', { type: 'button', class: 'pill solid', onclick: showPairingCode }, 'Show a pairing code'),
+        ),
+  );
+
+  const waiting = view.pending.length
+    ? h(
+        'section',
+        { class: 'section' },
+        h('div', { class: 'label' }, 'Waiting for you'),
+        h(
+          'ul',
+          { class: 'phone-list' },
+          view.pending.map((p) =>
+            h(
+              'li',
+              { class: 'phone-row' },
+              h('div', { class: 'phone-who' }, h('strong', {}, p.name), h('span', { class: 'note' }, p.tailscaleLogin)),
+              h(
+                'div',
+                { class: 'actions' },
+                h('button', { type: 'button', class: 'pill solid small', onclick: () => answerPairing(p, true) }, 'Allow'),
+                h('button', { type: 'button', class: 'pill outline small', onclick: () => answerPairing(p, false) }, 'Deny'),
+              ),
+            ),
+          ),
+        ),
+      )
+    : null;
+
+  const paired = h(
+    'section',
+    { class: 'section' },
+    h('div', { class: 'label' }, 'Paired phones'),
+    view.devices.length
+      ? h(
+          'ul',
+          { class: 'phone-list' },
+          view.devices.map((d) =>
+            h(
+              'li',
+              { class: 'phone-row' },
+              h(
+                'div',
+                { class: 'phone-who' },
+                h('strong', {}, d.name),
+                h('span', { class: 'note' }, `${d.tailscaleLogin} · last seen ${agoLong(d.lastSeenAt)}`),
+                h(
+                  'label',
+                  { class: 'toggle' },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: d.scopes.includes('decide'),
+                    onchange: (e) => setPhoneScopes(d, e.target.checked ? uniq([...d.scopes, 'decide']) : d.scopes.filter((x) => x !== 'decide')),
+                  }),
+                  'Can mark decisions',
+                ),
+              ),
+              disconnectButton('Disconnect', 'Click again to disconnect', () => api(`/api/devices/${encodeURIComponent(d.id)}`, { method: 'DELETE' })),
+            ),
+          ),
+        )
+      : h('p', { class: 'note' }, 'No phones yet.'),
+    view.devices.length > 1
+      ? disconnectButton('Disconnect all phones', 'Click again to disconnect all', () => api('/api/devices/all', { method: 'DELETE' }))
+      : null,
+  );
+
+  els.phones.replaceChildren(
+    h(
+      'section',
+      { class: 'composer phones-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'phones-title' },
+      h(
+        'div',
+        { class: 'composer-head' },
+        h('div', {}, h('div', { class: 'label' }, 'Phone mode'), h('h2', { id: 'phones-title' }, 'Phones')),
+        h(
+          'button',
+          { type: 'button', class: 'close', 'aria-label': 'Close', onclick: closePhones },
+          (() => {
+            const svg = s('svg', { width: 12, height: 12, viewBox: '0 0 12 12', 'aria-hidden': 'true' });
+            svg.append(s('path', { d: 'M2 2 L10 10 M10 2 L2 10' }));
+            return svg;
+          })(),
+        ),
+      ),
+      pair,
+      waiting,
+      paired,
+      h('p', { class: 'note' }, 'A phone can read sessions, and mark decisions if you let it. It can’t open terminals, rescan or change settings. Each phone works only for the Tailscale account that paired it.'),
+    ),
+  );
+}
+
+els.phonesBtn.addEventListener('click', openPhones);
+trapTab(els.phones);
+els.phones.addEventListener('pointerdown', (e) => {
+  if (e.target === els.phones) closePhones();
+});
 
 // ── Header ────────────────────────────────────────────────────────────────
 
@@ -2326,6 +2641,7 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape') {
     if (composer) return closeComposer();
+    if (state.phonesOpen) return closePhones();
     if (!els.meaningPanel.hidden) {
       setMeaningPanel(false);
       return els.meaningBtn.focus();
@@ -2365,6 +2681,7 @@ function setBoard(board) {
   const before = state.board ? new Map(state.board.sessions.map((x) => [x.id, x.updatedAt])) : null;
   state.board = board;
   state.byId = new Map(board.sessions.map((x) => [x.id, x]));
+  applyCapabilities();
   if (board.meaning) {
     state.meaning = board.meaning;
     renderMeaningButton();
@@ -2434,8 +2751,18 @@ function connectEvents() {
       select(open, { focusReader: false, keepPlace: true });
     }
   });
+  // Phone mode, on this computer: a phone asked to pair, or the list changed
+  es.addEventListener('devices', (e) => {
+    try {
+      setDevices(JSON.parse(e.data));
+    } catch {
+      /* ignore */
+    }
+  });
   es.onerror = () => {
     failures++;
+    // A phone that was disconnected gets 401 from here on; api() takes it to the pairing page
+    if (failures >= 2 && isPhone()) api('/api/board').catch(() => {});
     if (failures >= 2 && state.connected) {
       state.connected = false;
       renderHeader();
@@ -2448,7 +2775,10 @@ async function start() {
   try {
     const [board, layoutData] = await Promise.all([api('/api/board'), api('/api/layout')]);
     state.layout = layoutData;
+    // A phone opens in List, unless you chose another view on it before
+    if (board.capabilities?.device && prefs.get('view', null) == null) state.view = 'list';
     setBoard(board);
+    if (board.capabilities?.pairPhones) loadDevices();
     if (state.view === 'canvas') fit();
     const fromHash = decodeURIComponent(location.hash.slice(1));
     if (fromHash && state.byId.has(fromHash)) {
