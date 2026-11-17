@@ -20,6 +20,7 @@ An adapter knows one tool's on-disk format and nothing else. It implements the c
 - `discover(root)`: every session file under that root.
 - `parse(file)`: stream the file and return a `NormalizedSession` (see [`schema.ts`](../src/schema.ts)).
 - `resumeCommand(session)`: the shell command that reopens it.
+- `headless` (optional): how to run one turn without a terminal, in `plan` or `edit` mode, with the prompt on stdin, and how to read the tool's streamed output as `RunEvent`s (`src/adapters/headless.ts`). There's no mode that skips permissions, and a test checks every driver for flags that would.
 
 Rules every adapter follows:
 

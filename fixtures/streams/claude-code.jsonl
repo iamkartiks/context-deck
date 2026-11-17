@@ -1,0 +1,18 @@
+{"type":"system","subtype":"init","cwd":"/Users/alice/code/acme-shop","session_id":"7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11","tools":["Read","Grep","Glob","Bash"],"model":"claude-sonnet","permissionMode":"plan"}
+{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_01","role":"assistant","content":[]}},"session_id":"7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11"}
+{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"session_id":"7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11"}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me look at "}},"session_id":"7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11"}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"the rate limiter."}},"session_id":"7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11"}
+{"type":"stream_event","event":{"type":"content_block_stop","index":0},"session_id":"7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11"}
+{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01","name":"Read","input":{}}},"session_id":"7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11"}
+{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\": \"/Users/alice/code/acme-shop/src/limit.ts\"}"}},"session_id":"7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11"}
+{"type":"assistant","message":{"id":"msg_01","role":"assistant","content":[{"type":"text","text":"Let me look at the rate limiter."},{"type":"tool_use","id":"toolu_01","name":"Read","input":{"file_path":"/Users/alice/code/acme-shop/src/limit.ts"}}]},"session_id":"7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"export const WINDOW_MS = 60_000;"}]},"session_id":"7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11"}
+{"type":"assistant","message":{"id":"msg_02","role":"assistant","content":[{"type":"tool_use","id":"toolu_02","name":"Bash","input":{"command":"npm test -- limit","description":"Run the limiter tests"}}]},"session_id":"7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_02","is_error":true,"content":"Permission to use Bash has been denied."}]},"session_id":"7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11"}
+not json: a stray line the parser must ignore
+{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_03","role":"assistant","content":[]}},"session_id":"7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11"}
+{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"session_id":"7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11"}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The limiter resets every minute. Running the tests needs edit mode."}},"session_id":"7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11"}
+{"type":"assistant","message":{"id":"msg_03","role":"assistant","content":[{"type":"text","text":"The limiter resets every minute. Running the tests needs edit mode."}]},"session_id":"7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":8123,"num_turns":3,"result":"The limiter resets every minute. Running the tests needs edit mode.","session_id":"7c1e2a90-4b3d-4f6a-9c21-5d8e0f3a1b11","total_cost_usd":0.0123,"permission_denials":[{"tool_name":"Bash","tool_use_id":"toolu_02","tool_input":{"command":"npm test -- limit","description":"Run the limiter tests"}}]}

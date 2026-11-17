@@ -243,3 +243,44 @@ if (is('status', '--json')) {
         .map((l) => JSON.parse(l)),
   };
 }
+
+/**
+ * A fake agent CLI (stands in for claude, codex or qwen in headless mode): a
+ * Node script that reads all of stdin, records {args, cwd, stdin} to
+ * `logPath`, prints the lines of a stream recording, and exits with
+ * `exitCode`. Set FAKE_AGENT_STREAM, FAKE_AGENT_LOG and FAKE_AGENT_EXIT in
+ * its environment, or pass them to writeFakeAgent().
+ */
+export interface FakeAgent {
+  script: string;
+  logPath: string;
+  calls: () => { args: string[]; cwd: string; stdin: string }[];
+}
+
+export function writeFakeAgent(dir: string, opts: { stream: string; exitCode?: number; name?: string }): FakeAgent {
+  const script = join(dir, `fake-${opts.name ?? 'agent'}.mjs`);
+  const logPath = join(dir, `fake-${opts.name ?? 'agent'}.log`);
+  writeFileSync(
+    script,
+    `#!/usr/bin/env node
+import { appendFileSync, readFileSync } from 'node:fs';
+const chunks = [];
+for await (const c of process.stdin) chunks.push(c);
+const stdin = Buffer.concat(chunks).toString('utf8');
+appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), stdin }) + '\\n');
+process.stdout.write(readFileSync(${JSON.stringify(opts.stream)}, 'utf8'));
+process.exit(${opts.exitCode ?? 0});
+`,
+    { mode: 0o755 },
+  );
+  writeFileSync(logPath, '');
+  return {
+    script,
+    logPath,
+    calls: () =>
+      readFileSync(logPath, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map((l) => JSON.parse(l)),
+  };
+}
