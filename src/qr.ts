@@ -36,8 +36,11 @@ export function qrTerminal(text: string, opts: { color: boolean }): string {
       const top = m[y]![x]!;
       const bottom = m[y + 1]?.[x] ?? false;
       if (opts.color) {
-        // ▀ draws the top half in the foreground colour and the bottom in the background
-        line += `\x1b[${top ? 30 : 97}m\x1b[${bottom ? 40 : 107}m▀`;
+        // Same colour top and bottom: a space on a background colour, never a glyph
+        // in the same colour as its background (some terminals, VS Code's among
+        // them, recolour low-contrast text, which breaks the code). Mixed cells are
+        // always black on white, with ▀ or ▄ for the dark half.
+        line += top === bottom ? `\x1b[0;${top ? 40 : 107}m ` : `\x1b[0;30;107m${top ? '▀' : '▄'}`;
       } else {
         line += !top && !bottom ? '█' : !top ? '▀' : !bottom ? '▄' : ' ';
       }

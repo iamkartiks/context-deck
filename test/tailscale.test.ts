@@ -141,7 +141,12 @@ describe('qr codes', () => {
     const plain = qrTerminal(url, { color: false }).split('\n');
     assert.equal(plain.length, Math.ceil(size / 2));
     assert.ok(plain.every((l) => [...l].length === size && /^[█▀▄ ]+$/.test(l)));
-    assert.match(qrTerminal(url, { color: true }), /\x1b\[30m|\x1b\[97m/);
+    const colored = qrTerminal(url, { color: true });
+    assert.equal(colored.split('\n').length, Math.ceil(size / 2));
+    // Never a glyph drawn in its own background colour: uniform cells are spaces, mixed ones black on white
+    for (const cell of colored.match(/\x1b\[[\d;]*m./gu) ?? []) {
+      assert.match(cell, /^\x1b\[0;(?:40m |107m |30;107m[▀▄])$/u, JSON.stringify(cell));
+    }
     const svg = qrSvg(url);
     assert.match(svg, new RegExp(`^<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}"`));
     assert.doesNotMatch(svg, /<script|on\w+=/);

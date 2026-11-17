@@ -6,6 +6,13 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ### Added
 
+- **Use it from your phone** (`contextdeck ui --phone`). Phones on your own Tailscale network can browse, search and read sessions, and mark decisions, while everything stays on your computer.
+  - **Pairing:** scan a QR code, then allow the phone on the computer. Each phone is tied to the Tailscale account that paired it.
+  - **Only on your tailnet:** it never uses Tailscale Funnel, and refuses to start if Funnel is on.
+  - **Managing phones:** **Phones** in the canvas, `contextdeck phone devices` and `contextdeck phone revoke <id|all>`.
+  - **Audit log:** every pairing and every change a phone makes goes in `~/.contextdeck/phone-audit.log`, without content.
+  - **Limits:** phones can't open terminals, start handoffs, rescan or change settings.
+
 - **Decisions that may be out of date are flagged.** If a later session that never had a decision (in any tool) edits the files it covers, the Decisions view lists it first with the file and the session, `contextdeck decisions` marks it, and handoff briefs say so. **Still true** clears the flag until the files change again. `contextdeck decisions --changed` lists only these.
 - **Replace a decision.** When marking a new decision, choose the one it **Replaces**. The old one stays, struck through, and briefs carry the new one instead. **Restore** undoes it. `contextdeck decisions --all` lists replaced ones too.
 - Handoff briefs date each decision, and ask the new agent to check them against the code and say if one no longer holds.

@@ -6,7 +6,10 @@
   <meta name="contextdeck-token" content="__CONTEXTDECK_TOKEN__">
   <meta name="color-scheme" content="light dark">
   <title>ContextDeck</title>
+  <meta name="theme-color" content="#e4e3df" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1c1c1b" media="(prefers-color-scheme: dark)">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
   <link rel="stylesheet" href="/style.css">
   <script type="module" src="/app.js"></script>
 </head>
@@ -51,11 +54,17 @@
     </div>
 
     <div class="right">
+      <span class="device-chip" id="device-chip" hidden></span>
       <div class="chips" id="tool-filters" role="group" aria-label="Show sessions from"></div>
       <span class="count" id="count" aria-live="polite"></span>
       <button type="button" class="pill outline" id="rescan" title="Look for new and changed sessions now">
         <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M12 7 A5 5 0 1 1 10.5 3.4"></path><path d="M10.8 1.2 L10.8 3.8 L8.2 3.8"></path></svg>
         <span>Rescan</span>
+      </button>
+      <button type="button" class="pill outline" id="phones-btn" aria-haspopup="dialog" hidden>
+        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><rect x="4" y="1.5" width="6" height="11" rx="1.2"></rect><path d="M6.3 10.5 H7.7"></path></svg>
+        <span>Phones</span>
+        <i class="phones-dot" aria-hidden="true" hidden></i>
       </button>
     </div>
   </header>
@@ -104,8 +113,10 @@
     <aside id="reader" class="reader" hidden aria-labelledby="reader-title" tabindex="-1"></aside>
 
     <div id="composer" class="scrim" hidden></div>
+    <div id="phones" class="scrim" hidden></div>
   </main>
 
+  <section id="pair-ask" class="pair-ask" aria-labelledby="pair-ask-title" aria-live="polite" hidden></section>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 </body>
 </html>

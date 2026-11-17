@@ -1,0 +1,11 @@
+{
+  "name": "ContextDeck",
+  "short_name": "ContextDeck",
+  "description": "Your AI coding agent sessions, from the computer they run on.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#e4e3df",
+  "theme_color": "#e4e3df",
+  "icons": [{ "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}
