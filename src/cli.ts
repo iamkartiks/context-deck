@@ -8,6 +8,7 @@ import { indexSources, watchSources, type IndexSummary } from './indexer.js';
 import { openBrowser, startUiServer, type UiServer } from './server.js';
 import { loadDevices, pruneDevices, publicDevice, revokeDevices, saveDevices } from './devices.js';
 import { appendAudit } from './audit.js';
+import { runApprover } from './approvals.js';
 import { qrTerminal } from './qr.js';
 import { checkServe, requireReady, serve, unserve, unserveCommandText } from './tailscale.js';
 import { adapterByPrefix } from './adapters/index.js';
@@ -862,6 +863,12 @@ export async function main(argv: string[]): Promise<number> {
   }
   if (v.help || !command || command === 'help') {
     process.stdout.write(HELP);
+    return 0;
+  }
+
+  // Internal: the MCP server Claude Code starts for "ask me first" runs. Nothing but JSON-RPC on stdout.
+  if (command === 'approver') {
+    await runApprover(process.stdin, process.stdout, process.env, VERSION);
     return 0;
   }
 

@@ -47,10 +47,18 @@ export interface Adapter {
 /**
  * What a headless run may do. There is deliberately no mode that skips
  * permissions: `plan` changes nothing, `edit` may change files in the
- * session's folder and nothing else.
+ * session's folder and nothing else, and `ask` may do what a person allows,
+ * one request at a time (only tools that can send permission requests to
+ * ContextDeck support it).
  */
-export type RunMode = 'plan' | 'edit';
-export const RUN_MODES: readonly RunMode[] = ['plan', 'edit'];
+export type RunMode = 'plan' | 'edit' | 'ask';
+export const RUN_MODES: readonly RunMode[] = ['plan', 'edit', 'ask'];
+
+/** For `ask` runs: the MCP config that starts ContextDeck's approver, and its tool's full name. */
+export interface Approver {
+  mcpConfig: string;
+  tool: string;
+}
 
 /** What a headless run reports, parsed from the tool's streamed output. */
 export type RunEvent =
@@ -81,10 +89,12 @@ export interface HeadlessDriver {
    * any folder you've worked in; others only where you've used them yourself.
    */
   checksFolderTrust: boolean;
-  /** One turn that continues an existing session, in its own folder. Throws if the session has no folder. */
-  continueArgs(session: SessionRow, mode: RunMode): HeadlessCommand;
+  /** The tool can send each permission request to ContextDeck (`ask` mode). */
+  supportsAsk: boolean;
+  /** One turn that continues an existing session, in its own folder. Throws if the session has no folder, or for `ask` without an approver. */
+  continueArgs(session: SessionRow, mode: RunMode, approver?: Approver): HeadlessCommand;
   /** One turn that starts a new session in `cwd`. */
-  startArgs(cwd: string, mode: RunMode): HeadlessCommand;
+  startArgs(cwd: string, mode: RunMode, approver?: Approver): HeadlessCommand;
   /** Turn one line of the tool's output into zero or more events. Never throws. */
   parseLine(line: string): RunEvent[];
 }

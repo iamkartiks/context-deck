@@ -83,6 +83,15 @@ Phone mode lets devices on your own Tailscale network reach the canvas through T
 - **Limits:** one run per session at a time, a few at once overall, and a 30-minute time limit. Stopping a run from a phone needs the `run` scope.
 - **Logs** in `~/.contextdeck/runs/` are owner-only, hold events (redacted) and never the prompt, and are kept for at most 7 days.
 
+**Approvals** ("Ask me first", Claude Code only):
+
+- The run uses `--permission-mode manual` and `--permission-prompt-tool mcp__contextdeck__approve`, so every request that needs a person goes to ContextDeck's approver instead of being allowed.
+- The approver is `contextdeck approver`, an MCP server Claude Code starts from a config file ContextDeck writes for that run only (owner-only, in a private temp folder, deleted when the run ends).
+- The approver reaches ContextDeck over a local channel: a Unix socket in a folder only you can open, or a named pipe on Windows. Every request carries a random secret made for that run, checked in constant time; anything else is denied.
+- Anything that goes wrong (ContextDeck unreachable, an unreadable answer, the run ending, nobody answering for 10 minutes) is a **deny**, never an allow.
+- Requests go only to this computer and to phones with the `approve` scope, and only they can answer. Starting an "Ask me first" run from a phone needs `approve` too.
+- Each request asked and answered (allowed, denied, timed out) is in the audit log, without the command or the change.
+
 **Audit log:** `~/.contextdeck/phone-audit.log` (owner-only) gets one JSON line per pairing request, approval, denial, revocation, scope change and write from a device. Entries hold ids, routes and outcomes, never message text, briefs or secrets. The log is rotated at 1 MB, keeping one old file.
 
 **Out of scope:** a program already running on this computer could call `127.0.0.1` directly and forge these headers. That program can already read `~/.claude` and every other session folder, so phone mode doesn't defend against it.

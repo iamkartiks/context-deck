@@ -224,13 +224,13 @@ contextdeck ui --phone
 2. Scan the QR code in the terminal, or under **Phones** in the canvas, with your phone's camera. A code works once, for 5 minutes.
 3. Your computer asks: *Allow Pixel 9 (you@example.com) to open ContextDeck?* Choose **Allow**.
 4. The phone opens ContextDeck in List view. Use **Add to Home Screen** to keep it handy.
-5. To let it start agents, open **Phones** on the computer and tick what it may do: hand off sessions, send messages, edit files.
+5. To let it start agents, open **Phones** on the computer and tick what it may do: hand off sessions, send messages, edit files, answer an agent's requests.
 
 | | |
 |---|---|
 | **What a phone can do** | Browse, search and read sessions, follow agents at work, and mark or edit decisions. |
 | **Setting agents to work** | If you allow it under **Phones**: hand a session off to an agent, or send a session a message. The agent runs on your computer, in the session's folder, and the phone shows what it's doing live, with **Stop**. |
-| **Plan only, or edit** | Each run is **Plan only** (it reads and suggests, and changes nothing) unless the phone is also allowed to **edit files**; then you choose, and the folder is named in full. Nothing a phone sends can turn off an agent's permission checks. |
+| **Plan only, ask me first, or edit** | Each run is **Plan only** (it reads and suggests, and changes nothing) unless you allow more for that phone. **Ask me first** (Claude Code): the agent may edit and run commands, but every request shows up as a card with the command or the change, and waits for **Allow once** or **Deny**. Unanswered requests are denied after 10 minutes. **Edit files in <folder>**: it may change files there without asking. Nothing a phone sends can turn off an agent's permission checks. |
 | **Where agents run** | Only in folders where you've used that tool yourself, because Claude Code runs a folder's hooks and MCP servers without asking in this mode. Codex also runs in other folders you've worked in, since it checks project trust itself. |
 | **What it can't** | Open terminals, rescan, move cards or change settings. Those stay on the computer. |
 | **Disconnecting** | **Disconnect** under **Phones**, or `contextdeck phone revoke <id\|all>` (`contextdeck phone devices` lists them). The phone loses access straight away. A phone not seen for 30 days is disconnected by itself. |

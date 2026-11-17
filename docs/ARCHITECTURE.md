@@ -135,6 +135,7 @@ Off unless turned on (`~/.contextdeck/config.json`); while off, no code path tal
 | `POST /api/runs` | Start a run: `{kind: "resume", sessionId, prompt, mode}`, `{kind: "new", to, cwd, prompt, mode}` or `{kind: "handoff", sessionId, to, handoffId, brief, mode}`, with `mode` `plan` or `edit` |
 | `GET /api/runs` · `GET /api/runs/:id` | Active, waiting and recent runs; one run with its events |
 | `DELETE /api/runs/:id` | Stop a run |
+| `GET /api/approvals` · `POST /api/approvals/:id` | Requests from "ask me first" runs waiting for an answer; answer one with `{allow: true\|false}` |
 
 Writes need the per-run token embedded in the page; see [SECURITY.md](../SECURITY.md) for the full model.
 
@@ -163,6 +164,14 @@ A run is one headless turn of an agent on this computer, started from the canvas
 - **Keeping awake.** While a run is active: `caffeinate -i -w <pid>` on macOS, `systemd-inhibit` on Linux, nothing on Windows.
 - **Logs.** `~/.contextdeck/runs/<id>.jsonl` (0600): the run, its events and how it ended; never the prompt or raw output. The newest 50, at most 7 days old, are kept.
 - **Windows.** A tool installed as a `.cmd` or `.bat` script can only start through cmd.exe, so it's refused rather than passed through a shell.
+
+### Approvals (`src/approvals.ts`)
+
+"Ask me first" runs (`mode: "ask"`, only for drivers with `supportsAsk`: Claude Code) send each permission request to a person.
+
+- **The approver.** `contextdeck approver` is a minimal MCP server: JSON-RPC 2.0, one message per line on stdio, one tool, `approve`. Claude Code starts it from a per-run MCP config and calls it as its `--permission-prompt-tool`. It answers with one text block, `{"behavior":"allow","updatedInput":…}` or `{"behavior":"deny","message":…}`.
+- **The hub.** `ApprovalHub` listens on a Unix socket in a private temp folder (a named pipe on Windows). The approver sends `{runId, secret, tool, input}`; the hub checks the run's secret, turns the request into a card (`describeRequest()`: a command, an edit as before and after, a new file, or the input), and waits for `answer()` or the time limit.
+- **Events.** `approval` (`asked` / `answered`) goes only to this computer and phones with the `approve` scope.
 
 ### The canvas (`ui/`)
 

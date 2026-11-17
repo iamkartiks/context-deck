@@ -55,6 +55,7 @@ import { PairingCodes } from './pairing.js';
 import { qrSvg } from './qr.js';
 import { routeAccess, runScopes, type RouteAccess } from './scopes.js';
 import { isRunId, RunError, RunManager, type RunManagerOptions, type RunRequest } from './runs.js';
+import { ApprovalHub, isApprovalId } from './approvals.js';
 import { ADAPTERS } from './adapters/index.js';
 import { loadSettings } from './settings.js';
 
@@ -143,6 +144,8 @@ export interface UiServerOptions {
   phone?: PhoneOptions;
   /** Pairing codes and their rate limit (tests pass their own). */
   pairing?: PairingCodes;
+  /** Approvals for "ask me first" runs (tests pass their own). */
+  approvals?: ApprovalHub;
   /** Run manager settings (tests use fake agents and short timeouts). */
   runs?: Partial<Omit<RunManagerOptions, 'store' | 'sources' | 'home' | 'onChange' | 'onEvents' | 'onIndexed'>>;
   /** Called when a phone asks to pair, so the terminal can say so. */
@@ -283,7 +286,11 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
   };
   const meaning = opts.meaning ?? new MeaningService(store, cfg.home);
   const phoneSettings = loadSettings(cfg.home).phone;
+  // Approvals for "ask me first" runs, in phone mode only
+  const approvals = opts.phone ? (opts.approvals ?? new ApprovalHub({ home: cfg.home, timeoutMs: phoneSettings.approvalTimeoutMinutes * 60_000 })) : null;
+  const stopApprovalEvents = approvals?.listen((approval, change) => broadcast('approval', { approval, change }, { audience: 'approve' }));
   const runs = new RunManager({
+    approvals: approvals ?? undefined,
     store,
     sources: cfg.sources,
     home: cfg.home,
@@ -390,9 +397,17 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
     };
   };
 
-  const broadcast = (event: string, data: unknown, opts: { localOnly?: boolean } = {}) => {
+  /**
+   * Send an event to open pages. `localOnly`: this computer's pages only.
+   * `audience: 'approve'`: this computer, and phones that may answer approvals.
+   */
+  const broadcast = (event: string, data: unknown, opts: { localOnly?: boolean; audience?: 'approve' } = {}) => {
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-    for (const [res, deviceId] of clients) if (!opts.localOnly || deviceId === null) res.write(payload);
+    const approvers = opts.audience ? new Set(loadDevices(cfg.home).devices.filter((d) => d.scopes.includes('approve')).map((d) => d.id)) : null;
+    for (const [res, deviceId] of clients) {
+      if (deviceId !== null && (opts.localOnly || (approvers && !approvers.has(deviceId)))) continue;
+      res.write(payload);
+    }
   };
 
   // ── API handlers ─────────────────────────────────────────────────────────
@@ -418,11 +433,14 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       device: ctx.device ? { id: ctx.device.id, name: ctx.device.name, scopes: ctx.device.scopes } : null,
       /** Runs: what this page may start, and the tools that can run without a terminal. */
       // Only in phone mode: plain `contextdeck ui` starts nothing
+      /** May answer permission requests from "ask me first" runs. */
+      approve: !!phoneHost && may('approve'),
       runs: {
         handoff: !!phoneHost && may('handoff'),
         run: !!phoneHost && may('run'),
         edit: !!phoneHost && may('edit'),
-        tools: phoneHost ? ADAPTERS.filter((a) => a.headless).map((a) => ({ id: a.id, label: a.label })) : [],
+        ask: !!phoneHost && may('approve'),
+        tools: phoneHost ? ADAPTERS.filter((a) => a.headless).map((a) => ({ id: a.id, label: a.label, ask: !!a.headless?.supportsAsk })) : [],
       },
     };
   };
@@ -976,6 +994,21 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       return send(res, 200, { revoked });
     }
 
+    // ── Approvals ──
+    if (method === 'GET' && path === '/api/approvals') return send(res, 200, { approvals: approvals?.list() ?? [] });
+
+    if (method === 'POST' && path.startsWith('/api/approvals/')) {
+      const id = decodeURIComponent(path.slice('/api/approvals/'.length));
+      const body = (await readBody(req)) as { allow?: unknown } | null;
+      if (!body || typeof body.allow !== 'boolean') throw new HttpError(400, 'Expected {"allow": true|false}.');
+      if (!approvals || !isApprovalId(id)) throw new HttpError(404, 'No such request.');
+      try {
+        return send(res, 200, approvals.answer(id, body.allow, ctx.device ? { deviceId: ctx.device.id, name: ctx.device.name } : { deviceId: null, name: 'This computer' }));
+      } catch (err) {
+        throw new HttpError(404, (err as Error).message);
+      }
+    }
+
     // ── Runs ──
     if (method === 'GET' && path === '/api/runs') return send(res, 200, { runs: runs.list() });
 
@@ -995,7 +1028,9 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
         if (missing.length) {
           throw new HttpError(
             403,
-            missing.includes('edit') ? 'This device may only start runs in Plan only. You can change that on your computer.' : 'This device isn’t allowed to start that. You can change what it may do on your computer.',
+            missing.includes('edit') || missing.includes('approve')
+              ? `This device may only start runs in Plan only${missing.includes('approve') ? ': “Ask me first” needs it to be allowed to answer requests' : ''}. You can change that on your computer.`
+              : 'This device isn’t allowed to start that. You can change what it may do on your computer.',
           );
         }
       }
@@ -1081,6 +1116,13 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
     }
   }
   port = (server.address() as AddressInfo).port;
+  // Started once the server is up, so a failed start leaves nothing listening
+  try {
+    await approvals?.start();
+  } catch (err) {
+    server.close();
+    throw err;
+  }
 
   let watcher: Watcher | null = null;
   if (opts.watch !== false) {
@@ -1112,6 +1154,8 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       meaning.stop();
       // Agents get asked to stop first, so they can record the turn
       await runs.stopAll();
+      stopApprovalEvents?.();
+      await approvals?.close();
       for (const res of clients.keys()) res.end();
       clients.clear();
       await new Promise<void>((resolve) => {

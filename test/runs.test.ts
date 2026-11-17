@@ -456,7 +456,7 @@ describe('runs over HTTP, with phone scopes', () => {
       assert.equal(r.status, 409);
       assert.match(r.json().error, /phone mode/);
       const caps = (await call(plain.port, '/api/board')).json().capabilities.runs;
-      assert.deepEqual(caps, { handoff: false, run: false, edit: false, tools: [] });
+      assert.deepEqual(caps, { handoff: false, run: false, edit: false, ask: false, tools: [] });
     } finally {
       await plain.close();
     }

@@ -34,6 +34,8 @@ export interface PhoneSettings {
   runTimeoutMinutes: number;
   /** At most this many runs at once; more wait their turn. */
   maxConcurrentRuns: number;
+  /** A permission request nobody answers is denied after this many minutes. */
+  approvalTimeoutMinutes: number;
 }
 
 export interface Settings {
@@ -52,7 +54,7 @@ export function defaultSettings(): Settings {
   return {
     version: 1,
     semantic: { enabled: false, api: 'ollama', url: DEFAULT_URLS.ollama, model: DEFAULT_MODEL, dims: 512, allowRemote: false, minScore: null },
-    phone: { deviceIdleDays: 30, maxDevices: 10, runTimeoutMinutes: 30, maxConcurrentRuns: 3 },
+    phone: { deviceIdleDays: 30, maxDevices: 10, runTimeoutMinutes: 30, maxConcurrentRuns: 3, approvalTimeoutMinutes: 10 },
   };
 }
 
@@ -68,6 +70,7 @@ export function sanitizeSettings(input: unknown): Settings {
     if (int(p.maxDevices, 1, 50)) out.phone.maxDevices = p.maxDevices as number;
     if (int(p.runTimeoutMinutes, 1, 240)) out.phone.runTimeoutMinutes = p.runTimeoutMinutes as number;
     if (int(p.maxConcurrentRuns, 1, 10)) out.phone.maxConcurrentRuns = p.maxConcurrentRuns as number;
+    if (int(p.approvalTimeoutMinutes, 1, 60)) out.phone.approvalTimeoutMinutes = p.approvalTimeoutMinutes as number;
   }
   const s = (input as { semantic?: Record<string, unknown> } | null)?.semantic;
   if (!s || typeof s !== 'object') return out;
