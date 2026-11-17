@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <title>Pair with ContextDeck</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/pair.css">
+  <script type="module" src="/pair.js"></script>
+</head>
+<body>
+  <main class="pair">
+    <h1>Pair with ContextDeck</h1>
+
+    <section id="no-code">
+      <p>This device isn’t paired yet.</p>
+      <p>On your computer, run <code>contextdeck ui --phone</code> or choose <strong>Pair a phone</strong>, then scan the code it shows.</p>
+    </section>
+
+    <form id="ask" hidden>
+      <p>Give this device a name, so you can tell it apart on your computer.</p>
+      <label for="name">Device name</label>
+      <input id="name" name="name" maxlength="40" autocomplete="off" required>
+      <button type="submit" id="send">Pair this device</button>
+    </form>
+
+    <section id="waiting" hidden aria-live="polite">
+      <p>Waiting for you to allow it on your computer.</p>
+      <p class="muted">Your computer asks: Allow <strong id="w-name"></strong> (<span id="w-login"></span>) to open ContextDeck?</p>
+    </section>
+
+    <p id="message" role="status" hidden></p>
+  </main>
+</body>
+</html>
