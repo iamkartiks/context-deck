@@ -1,6 +1,7 @@
 import { cpSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { request as httpRequest } from 'node:http';
 import { fileURLToPath } from 'node:url';
 
 /** Repo root, resolved from dist/test/ at runtime. */
@@ -119,4 +120,47 @@ export async function startFakeModelServer(opts: { models?: string[]; dims?: num
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const port = (server.address() as { port: number }).port;
   return { url: `http://127.0.0.1:${port}`, calls, close: () => new Promise((r) => server.close(() => r())) };
+}
+
+export interface RawResponse {
+  status: number;
+  headers: Record<string, string | string[] | undefined>;
+  body: string;
+  json: () => any;
+}
+
+/**
+ * A raw HTTP request to 127.0.0.1, so tests can send any Host, Origin or
+ * proxy header (fetch won't let us set Host). Defaults Host to 127.0.0.1:<port>.
+ */
+export function rawRequest(
+  port: number,
+  path: string,
+  opts: { method?: string; headers?: Record<string, string>; body?: unknown } = {},
+): Promise<RawResponse> {
+  return new Promise((resolve, reject) => {
+    const data = opts.body === undefined ? undefined : JSON.stringify(opts.body);
+    const req = httpRequest(
+      {
+        host: '127.0.0.1',
+        port,
+        path,
+        method: opts.method ?? 'GET',
+        headers: {
+          Host: `127.0.0.1:${port}`,
+          ...(data ? { 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(data)) } : {}),
+          ...opts.headers,
+        },
+      },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => (body += c));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body, json: () => JSON.parse(body) }));
+      },
+    );
+    req.on('error', reject);
+    if (data) req.write(data);
+    req.end();
+  });
 }
