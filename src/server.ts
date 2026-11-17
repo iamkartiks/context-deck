@@ -52,6 +52,7 @@ import {
   type Device,
 } from './devices.js';
 import { PairingCodes } from './pairing.js';
+import { qrSvg } from './qr.js';
 import { routeAccess, type RouteAccess } from './scopes.js';
 import { loadSettings } from './settings.js';
 
@@ -138,6 +139,8 @@ export interface UiServerOptions {
   phone?: PhoneOptions;
   /** Pairing codes and their rate limit (tests pass their own). */
   pairing?: PairingCodes;
+  /** Called when a phone asks to pair, so the terminal can say so. */
+  onPairRequest?: (request: { id: string; name: string; tailscaleLogin: string }) => void;
 }
 
 export interface PhoneOptions {
@@ -205,6 +208,8 @@ export interface UiServer {
   url: string;
   port: number;
   token: string;
+  /** Phone mode: a new one-time pairing code and the URL to put in a QR code. Null when phone mode is off. */
+  pairingCode(): { code: string; url: string; expiresAt: string } | null;
   close(): Promise<void>;
 }
 
@@ -344,6 +349,12 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
         res.end();
       }
     }
+  };
+
+  const newPairingCode = () => {
+    if (!phoneHost) return null;
+    const { code, expiresAt } = codes.create();
+    return { code, url: `https://${phoneHost}/pair#${code}`, expiresAt };
   };
 
   const devicesView = () => {
@@ -813,6 +824,7 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
       saveDevices(cfg.home, file);
       appendAudit(cfg.home, { action: 'pair-requested', pendingId: pending.id, login });
       broadcast('devices', devicesView(), { localOnly: true });
+      opts.onPairRequest?.({ id: pending.id, name: pending.name, tailscaleLogin: pending.tailscaleLogin });
       res.setHeader('Set-Cookie', cookie(PENDING_COOKIE, claim, '/api/pair', PENDING_MS / 1000));
       return send(res, 202, publicPending(pending));
     }
@@ -861,8 +873,8 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
     // ── Devices, on this computer ──
     if (method === 'POST' && path === '/api/pair/code') {
       if (!phoneHost) throw new HttpError(409, 'Phone mode is off. Start ContextDeck with `contextdeck ui --phone`.');
-      const { code, expiresAt } = codes.create();
-      return send(res, 200, { code, url: `https://${phoneHost}/pair#${code}`, expiresAt });
+      const made = newPairingCode()!;
+      return send(res, 200, { ...made, svg: qrSvg(made.url) });
     }
 
     if (method === 'GET' && path === '/api/devices') return send(res, 200, devicesView());
@@ -994,6 +1006,7 @@ export async function startUiServer(store: Store, cfg: Config, opts: UiServerOpt
     url: `http://127.0.0.1:${port}/`,
     port,
     token,
+    pairingCode: newPairingCode,
     close: () =>
       new Promise<void>((resolve) => {
         clearInterval(heartbeat);

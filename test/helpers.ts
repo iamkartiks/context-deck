@@ -1,4 +1,4 @@
-import { cpSync, mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request as httpRequest } from 'node:http';
@@ -163,4 +163,83 @@ export function rawRequest(
     if (data) req.write(data);
     req.end();
   });
+}
+
+/**
+ * A fake `tailscale` CLI: a Node script that answers `status --json`,
+ * `serve status --json`, `serve --bg --https=443 <target>` and
+ * `serve --https=443 off` from a JSON state file, and logs every call's
+ * arguments (one JSON array per line). Set `state.funnelAfterServe` to have
+ * Serve turn Funnel on, or `state.failServe` to make `serve` fail.
+ */
+export interface FakeTailscale {
+  script: string;
+  statePath: string;
+  logPath: string;
+  state: () => any;
+  setState: (s: any) => void;
+  calls: () => string[][];
+}
+
+export const FAKE_TAILNET = 'laptop.tail1234.ts.net';
+
+export function fakeTailscaleState(over: Record<string, unknown> = {}) {
+  return {
+    status: { BackendState: 'Running', Self: { DNSName: `${FAKE_TAILNET}.` }, CertDomains: [FAKE_TAILNET] },
+    serve: {},
+    ...over,
+  };
+}
+
+export function writeFakeTailscale(dir: string, state: Record<string, unknown> = fakeTailscaleState()): FakeTailscale {
+  const script = join(dir, 'fake-tailscale.mjs');
+  const statePath = join(dir, 'fake-tailscale.json');
+  const logPath = join(dir, 'fake-tailscale.log');
+  writeFileSync(
+    script,
+    `#!/usr/bin/env node
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+const statePath = ${JSON.stringify(statePath)};
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + '\\n');
+const st = JSON.parse(readFileSync(statePath, 'utf8'));
+const save = () => writeFileSync(statePath, JSON.stringify(st));
+const key = st.status.Self.DNSName.replace(/\\.$/, '') + ':443';
+const is = (...want) => want.length === args.length && want.every((w, i) => w === args[i]);
+if (is('status', '--json')) {
+  process.stdout.write(JSON.stringify(st.status));
+  process.exit(st.statusExit ?? 0);
+} else if (is('serve', 'status', '--json')) {
+  process.stdout.write(JSON.stringify(st.serve));
+} else if (args[0] === 'serve' && args[1] === '--bg' && args[2] === '--https=443' && args.length === 4) {
+  if (st.failServe) { process.stderr.write('serve: HTTPS is not enabled\\n'); process.exit(1); }
+  st.serve.TCP = { ...(st.serve.TCP ?? {}), 443: { HTTPS: true } };
+  st.serve.Web = { ...(st.serve.Web ?? {}), [key]: { Handlers: { '/': { Proxy: args[3] } } } };
+  if (st.funnelAfterServe) st.serve.AllowFunnel = { [key]: true };
+  save();
+} else if (is('serve', '--https=443', 'off')) {
+  if (st.serve.Web) delete st.serve.Web[key];
+  if (st.serve.TCP) delete st.serve.TCP[443];
+  save();
+} else {
+  process.stderr.write('fake tailscale: unexpected arguments ' + JSON.stringify(args) + '\\n');
+  process.exit(2);
+}
+`,
+    { mode: 0o755 },
+  );
+  writeFileSync(statePath, JSON.stringify(state));
+  writeFileSync(logPath, '');
+  return {
+    script,
+    statePath,
+    logPath,
+    state: () => JSON.parse(readFileSync(statePath, 'utf8')),
+    setState: (s) => writeFileSync(statePath, JSON.stringify(s)),
+    calls: () =>
+      readFileSync(logPath, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map((l) => JSON.parse(l)),
+  };
 }

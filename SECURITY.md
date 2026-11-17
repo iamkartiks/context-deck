@@ -31,9 +31,18 @@ The UI is served by a small HTTP server that only listens on `127.0.0.1`. Becaus
 - On Windows the brief never goes on a command line. The tool is started with a one-line pointer to the brief file, built only from the session title (special characters removed), the brief's path and the marker. Reading an earlier brief back is done by handoff id, inside ContextDeck's own folder only.
 - Like every other write, `POST /api/handoff` needs the per-run token and a matching Origin. The target must be a known tool.
 
-### Phone mode (in development; not yet available from the command line)
+### Phone mode (`contextdeck ui --phone`, in development)
 
-Phone mode will let devices on your own Tailscale network reach the canvas through Tailscale Serve, which proxies HTTPS from your tailnet to the server on `127.0.0.1`. The server still listens only on `127.0.0.1`. The groundwork that's in place today:
+Phone mode lets devices on your own Tailscale network reach the canvas through Tailscale Serve, which proxies HTTPS from your tailnet to the server on `127.0.0.1`. It's on only while `contextdeck ui --phone` runs. The server still listens only on `127.0.0.1`.
+
+**Tailscale setup:**
+- ContextDeck runs the `tailscale` CLI with an argument list, never through a shell.
+- It points `https://<tailnet name>/` at its port with Serve, and refuses to replace anything else already served there.
+- It never turns on Funnel. It refuses to run if Funnel is on for that address, or for any address that reaches its port, and it checks this both before and after setting up Serve.
+- When it stops, it removes only the Serve entry it added, and prints the command to remove it by hand if that fails.
+- With `--no-serve`, it leaves Serve alone but still refuses Funnel.
+
+**Telling requests apart:**
 
 - **Local or remote.** In phone mode, one more `Host` is accepted: this computer's exact tailnet name (e.g. `laptop.tail1234.ts.net`), never a wildcard. Requests with that Host are remote. A request carrying a proxy header (`Tailscale-User-*`, `X-Forwarded-*`, `Forwarded`) is also treated as remote, even if its Host looks local, so a proxy that rewrites Host can't make a phone look like this computer.
 - **A Tailscale user is required.** Remote requests must carry the `Tailscale-User-Login` header that Serve adds and strips from clients. Without it (for example, traffic from a tagged device) the request is refused with 403.
