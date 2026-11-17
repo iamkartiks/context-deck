@@ -56,34 +56,7 @@ export async function indexSources(store: Store, sources: Source[], opts: IndexO
       sum.scanned++;
       opts.onFile?.(path, done, files.length);
 
-      let st;
-      try {
-        st = await stat(path);
-      } catch {
-        continue; // vanished between discover and stat
-      }
-      const prev = store.fileState(path);
-      if (!opts.full && prev && prev.size === st.size && prev.mtimeMs === Math.trunc(st.mtimeMs)) {
-        sum.unchanged++;
-        continue;
-      }
-
-      try {
-        const result = await adapter.parse(path);
-        sum.badLines += result.badLines;
-        if (result.session) {
-          store.saveSession(path, st.size, st.mtimeMs, result.badLines, result.session);
-          sum.indexed++;
-        } else {
-          store.recordFile(path, adapter.id, st.size, st.mtimeMs, result.badLines, null);
-          sum.empty++;
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        store.recordFile(path, adapter.id, st.size, st.mtimeMs, 0, message);
-        sum.failed++;
-        sum.errors.push({ path, error: message });
-      }
+      await indexFileInto(store, adapter, path, sum, opts.full);
     }
 
     // Only prune when the root exists: an unplugged drive should not wipe the index.
@@ -100,6 +73,61 @@ export async function indexSources(store: Store, sources: Source[], opts: IndexO
   // Removed or rewritten sessions leave free pages behind; give them back
   if (sum.removed || sum.indexed) store.reclaim();
 
+  sum.ms = Date.now() - started;
+  return sum;
+}
+
+function emptySummary(): IndexSummary {
+  return { scanned: 0, indexed: 0, unchanged: 0, removed: 0, empty: 0, failed: 0, badLines: 0, errors: [], ms: 0 };
+}
+
+/** Index one file if it changed, adding to `sum`. */
+async function indexFileInto(store: Store, adapter: Adapter, path: string, sum: IndexSummary, full = false): Promise<void> {
+  let st;
+  try {
+    st = await stat(path);
+  } catch {
+    return; // vanished between discover and stat
+  }
+  const prev = store.fileState(path);
+  if (!full && prev && prev.size === st.size && prev.mtimeMs === Math.trunc(st.mtimeMs)) {
+    sum.unchanged++;
+    return;
+  }
+  try {
+    const result = await adapter.parse(path);
+    sum.badLines += result.badLines;
+    if (result.session) {
+      store.saveSession(path, st.size, st.mtimeMs, result.badLines, result.session);
+      sum.indexed++;
+    } else {
+      store.recordFile(path, adapter.id, st.size, st.mtimeMs, result.badLines, null);
+      sum.empty++;
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    store.recordFile(path, adapter.id, st.size, st.mtimeMs, 0, message);
+    sum.failed++;
+    sum.errors.push({ path, error: message });
+  }
+}
+
+/**
+ * Bring one session up to date after a run: re-read just its files when the
+ * index knows them, else (a session the run just started) scan that tool's
+ * folder incrementally.
+ */
+export async function reindexSession(store: Store, sources: Source[], provider: string, sessionId: string | null): Promise<IndexSummary> {
+  const started = Date.now();
+  const files = sessionId ? store.sessionFiles(sessionId) : [];
+  const source = sources.find((s) => s.adapter.id === provider);
+  if (!source) return emptySummary();
+  if (!files.length) return indexSources(store, [source]);
+  const sum = emptySummary();
+  for (const path of files) {
+    sum.scanned++;
+    await indexFileInto(store, source.adapter, path, sum);
+  }
   sum.ms = Date.now() - started;
   return sum;
 }

@@ -75,6 +75,12 @@ export interface HeadlessCommand {
 export interface HeadlessDriver {
   /** The tool version these arguments and this output format were checked against. */
   testedWith: string;
+  /**
+   * The tool applies its own folder trust in headless mode: it won't load an
+   * untrusted folder's hooks, MCP servers or settings. Such a tool may run in
+   * any folder you've worked in; others only where you've used them yourself.
+   */
+  checksFolderTrust: boolean;
   /** One turn that continues an existing session, in its own folder. Throws if the session has no folder. */
   continueArgs(session: SessionRow, mode: RunMode): HeadlessCommand;
   /** One turn that starts a new session in `cwd`. */

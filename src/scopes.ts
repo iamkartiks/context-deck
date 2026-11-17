@@ -10,7 +10,11 @@ import type { Scope } from './devices.js';
  * call. A route missing from this table is refused remotely.
  */
 
-export type RouteAccess = Scope | 'local' | 'pairing';
+/**
+ * `runs`: starting a run, where the scope depends on the request body (see
+ * runScopes()). A phone needs `handoff` or `run` to reach the route at all.
+ */
+export type RouteAccess = Scope | 'local' | 'pairing' | 'runs';
 
 export interface RouteRule {
   method: 'GET' | 'POST' | 'PUT' | 'DELETE';
@@ -39,6 +43,12 @@ export const ROUTES: readonly RouteRule[] = [
   { method: 'GET', path: '/api/handoff/preview', access: 'handoff' },
   { method: 'POST', path: '/api/handoff', access: 'local' },
 
+  // Runs: agents started on this computer, watched and stopped from anywhere
+  { method: 'GET', path: '/api/runs', access: 'view' },
+  { method: 'GET', path: '/api/runs/*', access: 'view' },
+  { method: 'POST', path: '/api/runs', access: 'runs' },
+  { method: 'DELETE', path: '/api/runs/*', access: 'run' },
+
   // Never from another device
   { method: 'POST', path: '/api/open-terminal', access: 'local' },
   { method: 'PUT', path: '/api/layout', access: 'local' },
@@ -66,4 +76,14 @@ function matches(rule: RouteRule, path: string): boolean {
 /** The rule for a request, or null when the route isn't in the table. */
 export function routeAccess(method: string, path: string): RouteAccess | null {
   return ROUTES.find((r) => r.method === method && matches(r, path))?.access ?? null;
+}
+
+/**
+ * The scopes a phone needs to start a run: `handoff` to hand off a session,
+ * `run` to resume one or start a new one, plus `edit` for "Edit this folder".
+ */
+export function runScopes(kind: string, mode: string): Scope[] {
+  const scopes: Scope[] = [kind === 'handoff' ? 'handoff' : 'run'];
+  if (mode !== 'plan') scopes.push('edit');
+  return scopes;
 }

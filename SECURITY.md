@@ -69,10 +69,19 @@ Phone mode lets devices on your own Tailscale network reach the canvas through T
 - the device must not have expired. A device expires 30 days after it was last seen.
 
 **Scopes:** each route needs a scope, listed in one table (`src/scopes.ts`). Any route missing from that table is refused to remote devices.
-- New devices get `view` and `decide`.
+- New devices get `view` and `decide`. `handoff`, `run` and `edit` (starting agents) are granted per device on the computer.
 - Opening a terminal, changing the layout, rescanning, search-by-meaning settings, starting a handoff, and managing devices are never allowed remotely, whatever a device holds.
 
 **Revoking** removes the device. Its next request fails, and its open event streams close within a second, even when it was revoked from the command line.
+
+**Runs** start an agent on this computer, from the canvas or a phone with the `run` (continue or start a session) or `handoff` scope:
+
+- **Only two modes:** *Plan only* (no changes) or *Edit this folder*. A phone needs the `edit` scope for the second. The flags for each come from a fixed table per tool, and nothing in a request becomes an argument. A test checks that no tool, mode or kind of run uses a flag that skips permissions or the sandbox.
+- **The prompt goes on stdin,** never on the command line, where other programs could see it.
+- **Session ids are checked** before they become arguments, so an id can't be read as a flag.
+- **Folder trust:** a run happens only in a folder where that tool already has sessions, because Claude Code's `-p` loads a folder's hooks and `.mcp.json` without asking. Codex may also run in other folders you've worked in, because it loads a project's settings and hooks only once you've trusted the project in Codex.
+- **Limits:** one run per session at a time, a few at once overall, and a 30-minute time limit. Stopping a run from a phone needs the `run` scope.
+- **Logs** in `~/.contextdeck/runs/` are owner-only, hold events (redacted) and never the prompt, and are kept for at most 7 days.
 
 **Audit log:** `~/.contextdeck/phone-audit.log` (owner-only) gets one JSON line per pairing request, approval, denial, revocation, scope change and write from a device. Entries hold ids, routes and outcomes, never message text, briefs or secrets. The log is rotated at 1 MB, keeping one old file.
 
