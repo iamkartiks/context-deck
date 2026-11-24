@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import type { SessionRow } from '../schema.js';
 import type { Approver, HeadlessCommand, HeadlessDriver, RunEvent, RunMode } from './types.js';
 
@@ -259,6 +262,48 @@ export const claudeCodeHeadless: HeadlessDriver = {
  *   hook trust (`--dangerously-bypass-hook-trust` overrides that; never used).
  */
 const CODEX_SANDBOX: Record<'plan' | 'edit', string> = { plan: 'read-only', edit: 'workspace-write' };
+
+/** `dir` or the folder above it that holds a `.git`, if any. */
+function inGitRepo(dir: string): boolean {
+  for (let d = resolve(dir); ; d = dirname(d)) {
+    if (existsSync(join(d, '.git'))) return true;
+    if (dirname(d) === d) return false;
+  }
+}
+
+/** Folders marked `trust_level = "trusted"` in Codex's config.toml. */
+export function codexTrustedFolders(configToml: string): string[] {
+  const out: string[] = [];
+  let project: string | null = null;
+  for (const raw of configToml.split(/\r?\n/)) {
+    const line = raw.trim();
+    const header = /^\[projects\.(?:"((?:[^"\\]|\\.)*)"|'([^']*)')\]$/.exec(line);
+    if (header) {
+      project = header[1] != null ? header[1].replace(/\\(.)/g, '$1') : (header[2] ?? null);
+      continue;
+    }
+    if (line.startsWith('[')) project = null;
+    else if (project && /^trust_level\s*=\s*["']trusted["']/.test(line)) out.push(project);
+  }
+  return out;
+}
+
+/**
+ * Codex won't run headless outside a Git repository or a folder trusted in
+ * its own settings (and ContextDeck never passes `--skip-git-repo-check`).
+ */
+function codexFolderProblem(cwd: string, env: NodeJS.ProcessEnv): string | null {
+  if (inGitRepo(cwd)) return null;
+  const config = join(env.CODEX_HOME || join(homedir(), '.codex'), 'config.toml');
+  let trusted: string[] = [];
+  try {
+    trusted = codexTrustedFolders(readFileSync(config, 'utf8')).map((p) => resolve(p));
+  } catch {
+    /* no config: nothing trusted */
+  }
+  if (trusted.includes(resolve(cwd))) return null;
+  return `Codex only runs in a Git repository or a folder you’ve trusted in Codex, and ${cwd} is neither. On this computer, open Codex in that folder once and trust it (or run git init there), then try again.`;
+}
 const codexConfig = (mode: 'plan' | 'edit') => ['-c', `sandbox_mode="${CODEX_SANDBOX[mode]}"`, '-c', 'approval_policy="never"'];
 
 export const codexHeadless: HeadlessDriver = {
@@ -266,6 +311,7 @@ export const codexHeadless: HeadlessDriver = {
   checksFolderTrust: true,
   // `exec` can't answer approval prompts (see docs/ROADMAP.md for the open question)
   supportsAsk: false,
+  folderProblem: codexFolderProblem,
   continueArgs(session, mode): HeadlessCommand {
     const m = noAsk('Codex', mode);
     return {

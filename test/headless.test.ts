@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { ADAPTERS, getAdapter } from '../src/adapters/index.js';
-import { claudeCodeHeadless, codexHeadless, parseClaudeStyleLine, parseCodexLine, qwenCodeHeadless, summarizeInput } from '../src/adapters/headless.js';
+import { claudeCodeHeadless, codexHeadless, codexTrustedFolders, parseClaudeStyleLine, parseCodexLine, qwenCodeHeadless, summarizeInput } from '../src/adapters/headless.js';
 import { RUN_MODES, type HeadlessDriver, type RunEvent } from '../src/adapters/types.js';
 import type { SessionRow } from '../src/schema.js';
 import { FIXTURES, scratch, writeFakeAgent } from './helpers.js';
@@ -155,6 +155,44 @@ describe('headless drivers: arguments', () => {
 
   it('says which version each was checked against', () => {
     for (const [name, d] of DRIVERS) assert.match(d.testedWith, /\d+\.\d+/, name);
+  });
+});
+
+describe('headless drivers: folders a tool refuses', () => {
+  it('Codex: a Git repository or a folder trusted in Codex is fine; anything else gets a plain reason', () => {
+    const s = scratch();
+    const codexHome = join(s.dir, 'codex-home');
+    const repo = join(s.dir, 'repo');
+    const inside = join(repo, 'packages', 'web');
+    const trusted = join(s.dir, 'trusted');
+    const plain = join(s.dir, 'plain');
+    for (const d of [join(repo, '.git'), inside, trusted, plain, codexHome]) mkdirSync(d, { recursive: true });
+    writeFileSync(join(codexHome, 'config.toml'), `model = "x"\n\n[projects."${trusted}"]\ntrust_level = "trusted"\n\n[projects."${plain}"]\ntrust_level = "untrusted"\n`);
+    const env = { CODEX_HOME: codexHome };
+    const check = codexHeadless.folderProblem!;
+    assert.equal(check(repo, env), null);
+    assert.equal(check(inside, env), null, 'a folder inside a repository');
+    assert.equal(check(trusted, env), null);
+    assert.match(check(plain, env) ?? '', /only runs in a Git repository or a folder you’ve trusted in Codex/);
+    assert.match(check(plain, { CODEX_HOME: join(s.dir, 'no-such-home') }) ?? '', /git init/, 'no config at all');
+    assert.equal(claudeCodeHeadless.folderProblem, undefined);
+    assert.equal(qwenCodeHeadless.folderProblem, undefined);
+  });
+
+  it('reads trusted folders from Codex’s config.toml', () => {
+    const toml = [
+      '[projects."/Users/me/a"]',
+      'trust_level = "trusted"',
+      "[projects.'/Users/me/b']",
+      "trust_level = 'trusted'",
+      '[projects."/Users/me/c"]',
+      'trust_level = "untrusted"',
+      '[other]',
+      'trust_level = "trusted"',
+      '[projects."C:\\\\work\\\\d"]',
+      'trust_level = "trusted"',
+    ].join('\n');
+    assert.deepEqual(codexTrustedFolders(toml), ['/Users/me/a', '/Users/me/b', 'C:\\work\\d']);
   });
 });
 

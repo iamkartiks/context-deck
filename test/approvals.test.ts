@@ -236,7 +236,7 @@ describe('“ask me first” runs', () => {
   const runs: RunInfo[] = [];
 
   before(async () => {
-    mkdirSync(folder);
+    mkdirSync(join(folder, '.git'), { recursive: true });
     store = new Store(cfg.dbPath);
     await indexSources(store, cfg.sources);
     // A Claude Code session that worked in this folder

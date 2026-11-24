@@ -25,7 +25,8 @@ function setup() {
   const acme = join(s.dir, 'code', 'acme-shop');
   const blog = join(s.dir, 'code', 'blog');
   const empty = join(s.dir, 'code', 'empty');
-  for (const d of [acme, blog, empty]) mkdirSync(d, { recursive: true });
+  // Git repositories, as Codex requires (unless the folder is trusted in Codex)
+  for (const d of [acme, blog, empty]) mkdirSync(join(d, '.git'), { recursive: true });
   const swap = (dir: string) => {
     for (const entry of readdirSync(dir, { withFileTypes: true, recursive: true })) {
       if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
@@ -196,6 +197,22 @@ describe('runs: one turn, start to finish', () => {
     const t2 = manager(env, stub, fake);
     assert.throws(() => t2.m.start({ kind: 'new', to: 'claude-code', cwd: env.blog, mode: 'plan', prompt: 'x' }, me), /Claude Code hasn’t been used in/);
     assert.throws(() => t2.m.start({ kind: 'new', to: 'qwen-code', cwd: env.blog, mode: 'plan', prompt: 'x' }, me), /Qwen Code hasn’t been used in/);
+  });
+
+  it('refuses a Codex run at once in a folder Codex itself would refuse, with what to do', () => {
+    const fake = writeFakeAgent(env.s.dir, { stream: stream('codex'), name: 'notrust' });
+    const plain = join(env.s.dir, 'not-a-repo');
+    mkdirSync(plain, { recursive: true });
+    const stub = Object.create(store) as Store;
+    stub.providersInFolder = () => ['codex', 'claude-code'];
+    const t = manager(env, stub, fake, { env: { CODEX_HOME: join(env.s.dir, 'no-codex-home') } });
+    assert.throws(
+      () => t.m.start({ kind: 'new', to: 'codex', cwd: plain, mode: 'plan', prompt: 'x' }, me),
+      (err: Error & { status?: number }) => err.status === 409 && /trusted in Codex/.test(err.message) && /git init/.test(err.message),
+    );
+    assert.equal(t.m.list().length, 0, 'nothing was queued');
+    // Other tools don't have that rule
+    t.m.cancel(t.m.start({ kind: 'new', to: 'claude-code', cwd: plain, mode: 'plan', prompt: 'x' }, me).id);
   });
 });
 

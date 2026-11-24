@@ -3133,6 +3133,13 @@ mark {
   .chat-bar .run-input {
     min-height: 44px;
   }
+  /* Under 16px, iOS zooms in when you tap a text box, and the page stays cut off */
+  .run-input,
+  .brief,
+  .find-input,
+  #q {
+    font-size: 16px;
+  }
   .chat-mode-picker summary {
     display: flex;
     align-items: center;

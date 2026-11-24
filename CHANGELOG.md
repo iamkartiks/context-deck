@@ -39,6 +39,10 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ### Fixed
 
+- Phone mode: a Codex run in a folder that isn't a Git repository or trusted in Codex is refused straight away, with what to do, instead of failing once started.
+- Phone mode: tapping the message box on an iPhone no longer zooms the page in and cuts it off.
+- The word "null" no longer shows in a session on a phone that can't send messages, in the pairing prompt, or above the message box.
+
 - `npm run eval:meaning` explains how to start Ollama and get the model instead of printing a stack trace.
 
 ## [0.8.0] - 2026-10-29

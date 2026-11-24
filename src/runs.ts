@@ -113,6 +113,8 @@ export interface RunManagerOptions {
   onIndexed?: (summary: IndexSummary) => void;
   /** Where "ask me first" runs send permission requests. Without it, `ask` is refused. */
   approvals?: ApprovalHub;
+  /** Environment for tools' own folder checks (Codex reads CODEX_HOME). Default: process.env. */
+  env?: NodeJS.ProcessEnv;
   /** How Claude Code starts the approver (tests). Default: this Node running `contextdeck approver`. */
   approverCommand?: { command: string; args: string[] };
 }
@@ -151,7 +153,7 @@ interface Live {
 export class RunManager {
   private readonly runs = new Map<string, Live>();
   private readonly order: string[] = [];
-  private readonly o: Required<Omit<RunManagerOptions, 'wrapCommand' | 'onChange' | 'onEvents' | 'onIndexed' | 'approvals' | 'approverCommand'>> & RunManagerOptions;
+  private readonly o: Required<Omit<RunManagerOptions, 'wrapCommand' | 'onChange' | 'onEvents' | 'onIndexed' | 'approvals' | 'approverCommand' | 'env'>> & RunManagerOptions;
 
   constructor(opts: RunManagerOptions) {
     this.o = {
@@ -334,8 +336,12 @@ export class RunManager {
   private checkTrust(provider: string, cwd: string): void {
     const here = this.o.store.providersInFolder(cwd);
     const label = getAdapter(provider)?.label ?? provider;
-    if (here.includes(provider)) return;
-    if (this.driver(provider).checksFolderTrust && here.length) return;
+    if (here.includes(provider) || (this.driver(provider).checksFolderTrust && here.length)) {
+      // The tool's own rules: say so now, rather than have it fail once started
+      const problem = this.driver(provider).folderProblem?.(cwd, this.o.env ?? process.env);
+      if (problem) throw new RunError(409, problem);
+      return;
+    }
     throw new RunError(
       403,
       here.length

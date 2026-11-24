@@ -91,6 +91,11 @@ export interface HeadlessDriver {
   checksFolderTrust: boolean;
   /** The tool can send each permission request to ContextDeck (`ask` mode). */
   supportsAsk: boolean;
+  /**
+   * Why the tool would refuse to run in `cwd` by its own rules, in words, or
+   * null. Checked before a run is queued, so the answer comes at once.
+   */
+  folderProblem?(cwd: string, env: NodeJS.ProcessEnv): string | null;
   /** One turn that continues an existing session, in its own folder. Throws if the session has no folder, or for `ask` without an approver. */
   continueArgs(session: SessionRow, mode: RunMode, approver?: Approver): HeadlessCommand;
   /** One turn that starts a new session in `cwd`. */
