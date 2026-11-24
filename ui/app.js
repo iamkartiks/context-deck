@@ -2060,7 +2060,8 @@ function renderReader({ keepScroll = null } = {}) {
         chatTurns(sess.id),
       ),
     ),
-    canMessage(sess) ? chatBar(sess) : null,
+    // replaceChildren would show a null as the text "null"
+    ...(canMessage(sess) ? [chatBar(sess)] : []),
   );
   els.reader.hidden = false;
   els.reader.scrollTop = keepScroll ?? 0;
@@ -2542,7 +2543,7 @@ function fillChatStatus(el, sessionId) {
       waiting && running ? ` · ${waiting} more waiting` : waiting > 1 ? ` · ${waiting} messages` : '',
       '. A new message waits its turn.',
     ),
-    running && canStopRuns() ? h('button', { type: 'button', class: 'text-button', onclick: () => stopRun(running) }, 'Stop') : null,
+    ...(running && canStopRuns() ? [h('button', { type: 'button', class: 'text-button', onclick: () => stopRun(running) }, 'Stop')] : []),
   );
 }
 
@@ -3054,7 +3055,7 @@ function renderPairAsk() {
       h('button', { type: 'button', class: 'pill solid', onclick: () => answerPairing(p, true) }, 'Allow'),
       h('button', { type: 'button', class: 'pill outline', onclick: () => answerPairing(p, false) }, 'Deny'),
     ),
-    more > 0 ? h('p', { class: 'note' }, `${plural(more, 'more request')} after this one.`) : null,
+    ...(more > 0 ? [h('p', { class: 'note' }, `${plural(more, 'more request')} after this one.`)] : []),
   );
   els.pairAsk.hidden = false;
 }
